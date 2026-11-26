@@ -90,12 +90,72 @@ const TERMINAL = [
   ".markdown-code{--shiki-token-keyword:#f92672;--shiki-token-function:#a6e22e;--shiki-token-string:#e6db74;--shiki-token-string-expression:#e6db74;--shiki-token-constant:#be84ff;--shiki-token-parameter:#fd971f;--shiki-token-comment:#75715e;--shiki-token-punctuation:#f8f8f2}",
 ].join("");
 
+// The sidecar scrolls before it knows the final row heights. Follow later growth
+// until the reader scrolls up to read an earlier message.
+const STICK = `<script id="cmux-chat-stick">(() => {
+  let el, pinned = true, frame = 0, drag = null, dragging = false, lastTop = 0, touchY, downUntil = 0;
+  const gap = () => el.scrollHeight - el.clientHeight - el.scrollTop;
+  function schedule() {
+    if (!frame) frame = requestAnimationFrame(() => {
+      frame = 0;
+      if (el && pinned && gap() > 2) el.scrollTop = el.scrollHeight;
+    });
+  }
+  const sizes = typeof ResizeObserver === 'function' && new ResizeObserver(schedule);
+  const changes = typeof MutationObserver === 'function' && new MutationObserver(sync);
+  function sync(records = []) {
+    const next = document.getElementById('messages'), replaced = next !== el;
+    if (replaced) { el = next; drag = null; downUntil = 0; touchY = undefined; }
+    if (replaced || records.some(r => r.target === el && r.type === 'childList') || !changes) {
+      if (sizes) { sizes.disconnect(); if (el) for (const node of [el, ...el.children]) sizes.observe(node); }
+      if (changes && replaced) {
+        changes.disconnect();
+        changes.observe(document, {childList: true, subtree: true});
+        if (el) changes.observe(el, {childList: true, subtree: true, attributes: true, characterData: true});
+      }
+    }
+    schedule();
+  }
+  if (!changes) setInterval(sync, 250);
+  const on = (type, fn) => document.addEventListener(type, fn, {capture: true, passive: true});
+  function intent(up) {
+    downUntil = up ? 0 : performance.now() + 500;
+    if (up) pinned = false;
+    else if (el && gap() <= 2) { pinned = true; schedule(); }
+  }
+  on('wheel', e => { if (el?.contains(e.target) && e.deltaY) intent(e.deltaY < 0); });
+  on('touchstart', e => { touchY = el?.contains(e.target) ? e.touches[0].clientY : undefined; });
+  on('touchmove', e => {
+    const y = e.touches[0].clientY;
+    if (touchY !== undefined && y !== touchY) { intent(y > touchY); touchY = y; }
+  });
+  on('keydown', e => {
+    if (e.key === 'End') { pinned = true; schedule(); }
+    else if (['ArrowUp','PageUp','Home','ArrowDown','PageDown',' '].includes(e.key))
+      intent(['ArrowUp','PageUp','Home'].includes(e.key) || (e.key === ' ' && e.shiftKey));
+  });
+  on('pointerdown', e => {
+    if (el && e.target === el) { drag = e.pointerId; dragging = e.offsetX >= el.clientWidth; lastTop = el.scrollTop; }
+  });
+  on('pointermove', e => { if (drag === e.pointerId) dragging = true; });
+  const release = e => { if (drag === e.pointerId) drag = null; };
+  on('pointerup', release); on('pointercancel', release);
+  on('scroll', e => {
+    if (e.target !== el) return;
+    if (drag !== null && dragging && el.scrollTop !== lastTop) { pinned = el.scrollTop > lastTop && gap() <= 80; lastTop = el.scrollTop; }
+    else if (performance.now() < downUntil && gap() <= 80) pinned = true;
+    schedule();
+  });
+  on('scrollend', e => { if (e.target === el) downUntil = 0; });
+  on('visibilitychange', schedule); sync();
+})();</script>`;
+
 // No input box, and no request to another host, for example an image in a reply.
-async function harden(res: Response | undefined, host: string) {
+async function harden(res: Response | undefined, host: string, sidecar = false) {
   if (!res?.headers.get("content-type")?.startsWith("text/html")) return res;
   const headers = new Headers(res.headers);
   headers.set("content-security-policy", `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws://${host}; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'self'`);
-  const text = (await res.text()).replace("</head>", `<style>:root{--font-size-base:16px!important;--font-size-code:14px!important}:is(${WIDE}){max-width:none!important;padding-left:16px;padding-right:16px}${TERMINAL}#chat-card{display:none!important}</style></head>`);
+  const text = (await res.text()).replace("</head>", `${sidecar ? STICK : ""}<style>:root{--font-size-base:16px!important;--font-size-code:14px!important}:is(${WIDE}){max-width:none!important;padding-left:16px;padding-right:16px}${TERMINAL}#chat-card{display:none!important}</style></head>`);
   return new Response(text, { status: res.status, headers });
 }
 
@@ -114,7 +174,7 @@ const serve = Bun.serve as any;
         return harden(await follow(url), url.host);
       }
       if (req.method !== "GET" && req.method !== "HEAD") return new Response("read-only", { status: 405 });
-      return harden(await options.fetch(req, server), url.host);
+      return harden(await options.fetch(req, server), url.host, true);
     },
     websocket: {
       ...options.websocket,
