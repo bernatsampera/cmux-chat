@@ -18,6 +18,8 @@ export const CODEX_DIR = process.env.CODEX_HOME || join(homedir(), ".codex");
 // lib/tabs.ts writes the chats of each project here, lib/follow.ts what was picked in the strip.
 export const CHATS_FILE = join(STATE_DIR, "chats.json");
 export const PICK_FILE = join(STATE_DIR, "pick.json");
+export const RENAME_FILE = join(STATE_DIR, "rename.json");
+export const validTitle = (title: unknown): title is string => typeof title === "string" && title.length <= 80 && Boolean(title.trim());
 export interface Chat { workspace: string; terminal: string; title: string; agent?: Agent; unread: boolean }
 export interface Project { id: string; folder: string; chats: Chat[] }
 

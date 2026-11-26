@@ -3,6 +3,8 @@
 //
 // Ways it can fail (written before the code). F = covered below. P = place.e2e.ts, run from here.
 //
+//   F83 The native menu opens, the wrong tab gets edited, a poll replaces the editor, or a canceled or invalid edit sends a rename. A saved title flashes back or becomes HTML.
+//   F84 A rename bypasses the pick route protections, changes a different project, or writes an invalid or altered title.
 // The chat shows the wrong session
 //   F01 The user switches the terminal tab: the chat does not change, or needs more than 0.5 s.
 //   F02 After /clear or a resume (same process, new session id) the chat shows the old session.
@@ -74,14 +76,14 @@
 // home, the state, and the transcripts are synthetic, in the output dir.
 import { config } from "../lib/config";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 
 const ROOT = resolve(import.meta.dir, "..");
-const BASE = process.env.ORCA_CHAT_E2E_OUT ?? tmpdir();
+const BASE = process.env.ORCA_CHAT_E2E_OUT ?? realpathSync(tmpdir());
 const OUT = join(BASE, new Date().toISOString().replace(/[:.]/g, "-"));
 const HOME = join(OUT, "home"), STATE = join(OUT, "state"), CLAUDE = join(HOME, ".claude"), CODEX = join(HOME, ".codex");
 const RES = join(OUT, "Contents/Resources"), STUB = join(RES, "bin"), CLI = join(RES, "app.asar.unpacked/out/cli");
@@ -402,7 +404,7 @@ const capped = [...appCss.matchAll(/([^{}]+)\{[^{}]*max-width: 760px/g)].map((m)
 check("F73", "each part that cmux caps at 760 px is wider", capped.length > 10 && capped.every((s) => wide.includes(s)), { capped, wide });
 const chatTsx = readFileSync(join(DATA, "cmux-src/agent-chat/src/components/Chat.tsx"), "utf8"), card = chatTsx.slice(chatTsx.indexOf('<div id="chat-card">'));
 check("F20", "in the pinned source the input, send, and stop are inside that card", card.includes('id="chat-input"') && card.includes("{chatActions}") && !chatTsx.slice(chatTsx.indexOf("return ("), chatTsx.indexOf('<div id="chat-card">')).includes("<textarea"));
-check("F20", "the follow page has no input", !/<(input|textarea|form|button)|contenteditable/i.test(followPage.body));
+check("F20", "the follow page has no composer", !/<(input|textarea|form|button)|contenteditable/i.test(followPage.body.replace('<button id="rename" hidden>Rename</button>', "")));
 const csp = (p: any) => Object.fromEntries(String(p.headers["content-security-policy"] ?? "").split("; ").map((d: string) => [d.split(" ")[0], d.split(" ").slice(1).join(" ")]));
 check("F25", "the policy has no remote source", [followPage, chatPage, landing].every((p) => csp(p)["img-src"] === "'self' data: blob:" && csp(p)["default-src"] === "'self'" && !/https?:|\*/.test(p.headers["content-security-policy"])), csp(chatPage));
 check("F25", "the policy allows what the app uses: inline style and script, its WebSocket, its base", csp(chatPage)["style-src"].includes("'unsafe-inline'") && csp(chatPage)["script-src"].includes("'unsafe-inline'") && csp(chatPage)["connect-src"] === `'self' ws://127.0.0.1:${port}` && csp(chatPage)["base-uri"] === "'self'");
@@ -450,14 +452,14 @@ check("F34", "the token is not in the server log", log.length > 0 && !log.includ
 const script = followPage.body.match(/<script>([\s\S]*)<\/script>/)![1];
 const frames: any[] = [], made: any[] = [], timers: Function[] = [];
 const noteEl: any = { textContent: "" }, stateEl: any = { textContent: "" };
-const element = () => { const e: any = { className: "", textContent: "", children: [], append: (...c: any[]) => e.children.push(...c), insertBefore(c: any, at: any) { c.remove(); e.children.splice(at ? e.children.indexOf(at) : e.children.length, 0, c); c.parent = e; }, remove() { const i = e.parent?.children.indexOf(e) ?? -1; if (i >= 0) e.parent.children.splice(i, 1); }, scrollIntoView: () => (scrolled = e) }; return e; };
+const element = () => { const e: any = { className: "", textContent: "", children: [], style: {}, setAttribute() {}, focus() {}, select() { e.selected = true; }, append: (...nodes: any[]) => nodes.forEach(c => { c.parent = e; e.children.push(c); }), insertBefore(c: any, at: any) { c.remove(); e.children.splice(at ? e.children.indexOf(at) : e.children.length, 0, c); c.parent = e; }, remove() { const i = e.parent?.children.indexOf(e) ?? -1; if (i >= 0) e.parent.children.splice(i, 1); }, scrollIntoView: () => (scrolled = e) }; return e; };
 let scrolled: any;
-const ids: Record<string, any> = { note: noteEl, state: stateEl, bar: element(), tabs: element(), plus: element() };
+const ids: Record<string, any> = { note: noteEl, state: stateEl, rename: element(), bar: element(), tabs: element(), plus: element() };
 const doc: any = { visibilityState: "visible", title: "", getElementById: (id: string) => ids[id], createElement: (tag: string) => { if (tag !== "iframe") return element(); const f: any = { tag, className: "", src: "", remove() { frames.splice(frames.indexOf(f), 1); } }; made.push(f); return f; }, body: { append: (f: any) => (frames.push(f), f.onload()) }, addEventListener: (_: string, fn: Function) => (doc.wake = fn) };
 let fetches = 0, inFlight = 0, most = 0, fake: any = null;
 const sent: { path: string; init: any }[] = [];
 const pageFetch = async (path: string, init: any) => {
-  if (path.startsWith("follow/pick")) return sent.push({ path, init }), { ok: true };
+  if (path.startsWith("follow/pick") || path.startsWith("follow/rename")) return sent.push({ path, init }), { ok: true };
   fetches++;
   most = Math.max(most, ++inFlight);
   try {
@@ -527,6 +529,33 @@ check("F80", "no chats: no strip, and the words stay", (await barOf({})) === "" 
   sent.length = 0;
   first.onclick(); ids.plus.onclick(); ids.plus.onclick();
   check("F79", "a click sends the chat and the header, a double click on the plus one new chat", sent.length === 2 && sent[0].path === `follow/pick${url.search}&cmux=ME&to=a` && sent[1].path.endsWith("&to=new") && sent.every((x) => x.init.headers["x-orca-chat"] === "pick"), sent);
+  await barOf({ chats: [c("a", { workspace: "wa" }), c("me", { workspace: "wm" })] });
+  sent.length = 0;
+  let prevented = false;
+  first.oncontextmenu({ preventDefault() { prevented = true; }, clientX: 25, clientY: 15 });
+  check("F83", "right click opens Rename without picking", prevented && !ids.rename.hidden && sent.length === 0 && followPage.body.includes(">Rename</button>"));
+  ids.rename.onclick();
+  const input = first.children[3];
+  check("F83", "the current name is selected in the tab", input.selected && input.value === "chat a" && input.maxLength === 80);
+  const key = (field: any, key: string) => field.onkeydown({ key, preventDefault() {}, stopPropagation() {} });
+  const title = "<img src=x> & hello";
+  input.value = title;
+  key(input, "Enter");
+  const save = sent[0], query = new URLSearchParams(save?.path.split("?")[1]);
+  check("F83", "save sends the workspace, exact text and rename header, and shows the title immediately", save?.path.startsWith("follow/rename?") && query.get("title") === title && query.get("workspace") === "wa" && save.init.headers["x-orca-chat"] === "rename" && first.children[1].textContent === title);
+  await barOf({ chats: [c("a", { workspace: "wa", status: "busy" }), c("me", { workspace: "wm" })] });
+  check("F83", "a stale poll keeps the optimistic title", first.children[1].textContent === title);
+  const current = ids.tabs.children[1];
+  current.ondblclick();
+  current.children[3].value = "  ";
+  key(current.children[3], "Enter");
+  current.children[3]?.onblur();
+  current.ondblclick();
+  current.children[3].value = "cancel";
+  key(current.children[3], "Escape");
+  current.ondblclick();
+  current.children[3].onblur();
+  check("F83", "blank, Escape and unchanged blur leave the current title alone", sent.length === 1 && current.children.length === 3 && current.children[1].textContent === "chat me");
   await barOf({ chats: [] });
   check("F80", "the list is gone: no strip", ids.tabs.children.length === 0 && ids.bar.className === "", ids.bar.className);
   fake = null;
@@ -661,6 +690,16 @@ check("F82", "Codex with no turn in its rollout: no state", (s as any).status ==
   writeFileSync(CHATS, "{"); const broken = await chats(surf.C1);
   check("F80", "the helper is gone, or the list is broken: no chats", dead.rows.length === 0 && broken.rows.length === 0, [dead, broken]);
   list();
+  const target = JSON.parse(readFileSync(CHATS, "utf8")).projects[0].chats[1].workspace;
+  const title = "<b>' & $(hello)\nworld</b>", renameFile = join(STATE, "rename.json");
+  const rename = (name: string, workspace = target) => `/${token}/follow/rename?cmux=${surf.C1}&workspace=${workspace}&title=${encodeURIComponent(name)}`;
+  const header = { "x-orca-chat": "rename" };
+  const denied = await Promise.all([get(rename(title)), get(rename(title), { ...header, "sec-fetch-site": "cross-site" }), get(rename(title), { ...header, origin: "https://evil.example" }), get(rename(title), { ...header, host: "evil.example" }), get(rename(title), header, "POST")]);
+  const invalid = await Promise.all([get(rename("   "), header), get(rename("a".repeat(81)), header), get(rename(title, ws()), header)]);
+  check("F84", "unsafe requests and invalid edits leave no rename file", denied.every(r => r.status === 403) && invalid.every(r => r.status === 404) && !existsSync(renameFile));
+  const saved = await get(rename(title), header);
+  const payload = existsSync(renameFile) && JSON.parse(readFileSync(renameFile, "utf8"));
+  check("F84", "private rename file preserves title and workspace", saved.status === 204 && payload.workspace === target && payload.title === title && Math.abs(Date.now() - payload.at) < 2000 && perm(renameFile) === "600");
   const own = { "x-orca-chat": "pick" }, q = (to: string, from = surf.C1) => `/${token}/follow/pick?cmux=${from}&to=${to}`;
   const refused = await Promise.all([get(q(surf.X)), get(q(surf.X), { ...own, "sec-fetch-site": "cross-site" }), get(q(surf.X), { ...own, "sec-fetch-site": "same-site" }), get(q(surf.X), { "sec-fetch-site": "same-origin", "sec-fetch-dest": "image" }), get(q(surf.X), { ...own, origin: "https://evil.example" }), get(q(surf.X), { ...own, host: "evil.example" }), get(q(surf.X), own, "POST"), get(q(surf.X), {}, "OPTIONS")]);
   const missing = await Promise.all([get(q(surf.C2), own), get(q(uuid()), own), get(q("nope"), own), get(q(""), own), get(q(surf.X, uuid()), own), get(q("new", surf.C2), own), get(q("../x"), own), get(`/follow/pick?cmux=${surf.C1}&to=${surf.X}`, own), get(`/${"0".repeat(64)}/follow/pick?cmux=${surf.C1}&to=${surf.X}`, own)]);

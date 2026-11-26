@@ -33,4 +33,7 @@ check G9 'grep -q "^on: made$" "$OUT/o3"'
 printf 'ACME/two | %s\n' "$OUT/b" > "$OUT/r.txt"; before=$(wc -l < "$DB"); CMUX_WORKSPACE_ID=x "$HERE/../cmux/make-groups" "$OUT/r.txt" > "$OUT/o4" 2>&1
 check G10 '[ $(wc -l < "$DB") -eq $before ] && grep -qx "workspace_group:2 ACME/two" "$DB"'
 check G5 '! grep -qE "delete|close|ungroup|remove" "$LOG"'
-echo "$OUT/result.txt"; ! grep -q FAIL "$OUT/result.txt"
+jq -Rn '[inputs | split(" ") | {id: .[1], result: .[0]}] |
+  {passed: map(select(.result == "PASS")) | length, failed: map(select(.result == "FAIL")) | length, results: .}' \
+  < "$OUT/result.txt" > "$OUT/result.json" || exit 1
+echo "$OUT/result.json"; ! grep -q FAIL "$OUT/result.txt"

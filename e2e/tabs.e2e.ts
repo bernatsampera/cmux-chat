@@ -18,7 +18,7 @@
 // T14 --tab, started while the page pane has the focus (so its terminal is in the top pane).
 // T15 --tab blocks or fails the start of the agent: no chat page, no server, cmux hangs.
 // T16 Two watchers run, or none after the first chat of a project, or it ends with the terminal that started it.
-// T17 The watcher stays when cmux goes away, or it acts on a new cmux with what it knew of the old one.
+// T17 The watcher stays when cmux goes away, or it acts on a new cmux with what it knew of the old one. A cmux that is slow for a minute stops it.
 // T18 The tabs show "Chat" and not the name of the chat, or the auto-naming of cmux takes the name of the project.
 // T19 The modes that were there change: no flag with two pages must refuse.
 // T20 The token is in an argv, in the log, or in the event log of cmux.
@@ -432,9 +432,9 @@ exec '${CMUX}' "$@"
   check("T17", "with a cmux that answers it stays", w1.at === 0, readFileSync(join(OUT, "state-gone/out.log"), "utf8"));
   const down = Date.now();
   renameSync(up, up + ".off");
-  await until(() => w1.at, 30_000);
+  await until(() => w1.at, 160_000);
   metrics.cmuxGoneToExitMs = w1.at ? w1.at - down : -1;
-  check("T17", "cmux does not answer: it ends by itself in 25 seconds", w1.at > 0 && w1.at - down < 25_000, readFileSync(join(OUT, "state-gone/out.log"), "utf8"));
+  check("T17", "cmux does not answer: it ends by itself in 150 seconds", w1.at > 0 && w1.at - down < 150_000, readFileSync(join(OUT, "state-gone/out.log"), "utf8"));
   renameSync(up + ".off", up);
   writeFileSync(bootFile, "");
   const w2 = await run(join(OUT, "state-boot"));

@@ -5,7 +5,7 @@
 // server read-only: nothing can send text or an interrupt to a terminal.
 import { basename } from "node:path";
 import { UUID, signLink } from "./common";
-import { PAGE, followState, followSurface, pickChat } from "./follow";
+import { PAGE, followState, followSurface, pickChat, renameChat } from "./follow";
 import { liveJoin, liveServer } from "./live";
 import "./queue";
 
@@ -59,10 +59,11 @@ async function follow(url: URL): Promise<Response> {
 
 // A pick does something, so only the script of our own page can send it: an image or a link
 // in a chat has no such header, and another site may not set it.
-function pick(req: Request, url: URL): Response {
+function stripAction(req: Request, url: URL, action: "pick" | "rename"): Response {
   const [from, to] = ["cmux", "to"].map((k) => (url.searchParams.get(k) ?? "").toLowerCase());
-  if (req.headers.get("x-orca-chat") !== "pick" || !["same-origin", null].includes(req.headers.get("sec-fetch-site"))) return new Response("forbidden", { status: 403 });
-  return new Response(null, { status: pickChat(from, to) ? 204 : 404, headers: { "cache-control": "no-store" } });
+  if (req.headers.get("x-orca-chat") !== action || !["same-origin", null].includes(req.headers.get("sec-fetch-site"))) return new Response("forbidden", { status: 403 });
+  const ok = action === "pick" ? pickChat(from, to) : renameChat(from, (url.searchParams.get("workspace") ?? "").toLowerCase(), url.searchParams.get("title"));
+  return new Response(null, { status: ok ? 204 : 404, headers: { "cache-control": "no-store" } });
 }
 
 // The one-time link that cmux-chat-open gives to cmux: valid for a minute.
@@ -105,10 +106,11 @@ const serve = Bun.serve as any;
     ...options,
     async fetch(req: Request, server: any) {
       const url = new URL(req.url);
-      if (TOKEN && [`/${TOKEN}/follow`, `/${TOKEN}/follow/state`, `/${TOKEN}/follow/pick`, "/cmux-open"].includes(url.pathname)) {
+      if (TOKEN && [`/${TOKEN}/follow`, `/${TOKEN}/follow/state`, `/${TOKEN}/follow/pick`, `/${TOKEN}/follow/rename`, "/cmux-open"].includes(url.pathname)) {
         if (!trusted(req) || req.method !== "GET") return new Response("forbidden", { status: 403 });
         if (url.pathname === "/cmux-open") return openLink(url);
-        if (url.pathname.endsWith("/pick")) return pick(req, url);
+        if (url.pathname.endsWith("/pick")) return stripAction(req, url, "pick");
+        if (url.pathname.endsWith("/rename")) return stripAction(req, url, "rename");
         return harden(await follow(url), url.host);
       }
       if (req.method !== "GET" && req.method !== "HEAD") return new Response("read-only", { status: 405 });

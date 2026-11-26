@@ -5,7 +5,7 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { AGENTS, CHATS_FILE, CLAUDE_DIR, CODEX_DIR, PICK_FILE, Refusal, SESSION_ID, claudeLive, pidStart, processLeaf, processSurface, ps, readStore, runtimeClient, sh, writePrivate, writeStore, type Agent, type Project } from "./common";
+import { AGENTS, CHATS_FILE, CLAUDE_DIR, CODEX_DIR, PICK_FILE, RENAME_FILE, validTitle, Refusal, SESSION_ID, claudeLive, pidStart, processLeaf, processSurface, ps, readStore, runtimeClient, sh, writePrivate, writeStore, type Agent, type Project } from "./common";
 
 interface Claim { leaf: string; agent: Agent; sessionId: string; pid: number; start: string; cwd: string; path?: string; status?: string; since?: number }
 
@@ -198,7 +198,7 @@ function strip(surface: string) {
   if (!now || Date.now() - now.at > 1_500) agents.set(p.id, (now = { at: Date.now(), found: claims(new Set(p.chats.map((c) => c.terminal)), processSurface) }));
   const chats = p.chats.map((c) => {
     const live = now!.found.find((x) => x.leaf === c.terminal);
-    return { id: c.terminal, title: c.title, agent: live?.agent ?? c.agent, status: live?.status, since: live?.since, unread: c.unread };
+    return { id: c.terminal, workspace: c.workspace, title: c.title, agent: live?.agent ?? c.agent, status: live?.status, since: live?.since, unread: c.unread };
   });
   return { chats, plus: Boolean(p.folder) };
 }
@@ -208,6 +208,11 @@ export function pickChat(from: string, to: string): boolean {
   const p = project(from);
   if (!p || !(to === "new" ? p.folder : p.chats.some((c) => c.terminal === to))) return false;
   writePrivate(PICK_FILE, JSON.stringify({ from, to, at: Date.now() }));
+  return true;
+}
+export function renameChat(from: string, workspace: string, title: string | null): boolean {
+  if (!validTitle(title) || !project(from)?.chats.some(c => c.workspace === workspace)) return false;
+  writePrivate(RENAME_FILE, JSON.stringify({ workspace, title, at: Date.now() }));
   return true;
 }
 // For the log: the Claude processes of this terminal, read again without the cache.
@@ -256,10 +261,12 @@ iframe{position:fixed;inset:var(--bar) 0 var(--foot);width:100%;height:calc(100%
 .tab i{flex:none;width:14px;height:14px}.tab.claude i{background:${CLAUDE}}.tab.codex i{background:${CODEX}}.tab span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .tab b{flex:none;display:none;width:8px;height:8px;border-radius:50%}.tab:is(.busy,.ask,.new) b{display:block}.tab.busy b{background:#ffb86c;animation:beat 1.2s infinite}.tab.new b{background:#50fa7b}.tab.new span{font-weight:700;color:#f8f8f2}.tab.read:not(.me) span{opacity:.6}
 .tab.ask b{width:auto;height:auto;color:#ff79c6}.tab.ask b::before{content:"?"}
+#rename{position:fixed;z-index:1;background:#292929;color:#eee;border:1px solid #666;border-radius:4px;padding:5px 12px}
+.tab input{min-width:0;width:100%;font:inherit;color:inherit;background:#212121;border:1px solid #6272a4}
 #plus{flex:none;display:none;align-items:center;padding:0 12px;font-size:17px}#bar.plus #plus{display:flex}
 #state{position:fixed;inset:auto 0 0;height:var(--foot);line-height:28px;padding:0 16px;background:#212121;font-size:13px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 #state.busy{color:#ffb86c}#state.done{color:#50fa7b}#state.ask{color:#ff79c6}#state.busy::before{content:"\\25CF  ";animation:beat 1.2s infinite}@keyframes beat{50%{opacity:.15}}
-</style></head><body><div id="bar"><div id="tabs"></div><div id="plus" title="New Claude chat">+</div></div><div id="note"></div><div id="state"></div><script>
+</style></head><body><div id="bar"><div id="tabs"></div><div id="plus" title="New Claude chat">+</div></div><div id="note"></div><div id="state"></div><button id="rename" hidden>Rename</button><script>
 const command = location.search.startsWith("?cmux=") ? "cmux-chat-open" : "orca-chat";
 const frames = new Map(), loaded = new Set(), note = document.getElementById("note");
 let busy = false, timer, shown = null, wanted = null, misses = 0;
@@ -297,25 +304,87 @@ const me = (new URLSearchParams(location.search).get("cmux") || "").toLowerCase(
 const tabs = new Map();
 let chats = [], plus = false, drawn = "", order = "", started = 0;
 function pick(to) { fetch("follow/pick" + location.search + "&to=" + to, { headers: { "x-orca-chat": "pick" } }).catch(() => {}); }
+const menu = document.getElementById("rename"), pending = new Map();
+let editing, clickTimer;
+function edit(t, id) {
+  const chat = chats.find(c => c.id === id);
+  if (!chat || editing === t) return;
+  if (editing) editing.children[3].blur();
+  const label = t.children[1], input = document.createElement("input"), before = label.textContent;
+  editing = t;
+  label.hidden = true;
+  input.value = before;
+  input.maxLength = 80;
+  input.setAttribute("aria-label", "Chat name");
+  t.append(input);
+  input.focus();
+  input.select();
+  function finish(save) {
+    if (editing !== t) return;
+    editing = null;
+    const title = input.value;
+    input.remove();
+    label.hidden = false;
+    if (!save || !title.trim() || title.length > 80 || title === before) return;
+    const change = { title, until: Date.now() + 5000 };
+    pending.set(id, change);
+    drawn = "";
+    strip();
+    const query = new URLSearchParams(location.search);
+    query.set("workspace", chat.workspace);
+    query.set("title", title);
+    fetch("follow/rename?" + query, { headers: { "x-orca-chat": "rename" } }).then(r => {
+      if (!r.ok) throw Error();
+    }).catch(() => { if (pending.get(id) === change) { pending.delete(id); drawn = ""; strip(); } });
+  }
+  input.onblur = () => finish(true);
+  input.onkeydown = e => {
+    if (e.key === "Escape" || e.key === "Enter") { e.preventDefault(); finish(e.key === "Enter"); }
+  };
+}
 function strip() {
   const bar = document.getElementById("bar"), row = document.getElementById("tabs");
   bar.className = (chats.length ? "tabs" : "") + (plus ? " plus" : "");
-  const now = JSON.stringify([chats, chats.map(words)]);
+  for (const [id, change] of pending) {
+    const chat = chats.find(c => c.id === id);
+    if (!chat || chat.title === change.title || Date.now() >= change.until) pending.delete(id);
+  }
+  const now = JSON.stringify([chats, chats.map(words), [...pending]]);
   if (drawn === now) return;
   drawn = now;
-  for (const [id, t] of tabs) if (!chats.some((c) => c.id === id)) { t.remove(); tabs.delete(id); }
+  for (const [id, t] of tabs) if (!chats.some((c) => c.id === id)) {
+    if (editing === t) editing = null;
+    t.remove();
+    tabs.delete(id);
+  }
   chats.forEach((c, i) => {
     let t = tabs.get(c.id);
     if (!t) {
       t = document.createElement("div");
       t.append(document.createElement("i"), document.createElement("span"), document.createElement("b"));
-      t.onclick = () => pick(c.id);
+      t.onclick = () => {
+        if (editing === t) return;
+        if (c.id !== me) return pick(c.id);
+        clearTimeout(clickTimer);
+        clickTimer = setTimeout(() => pick(me), 500);
+      };
+      t.ondblclick = () => { if (c.id === me) { clearTimeout(clickTimer); edit(t, c.id); } };
+      t.oncontextmenu = e => {
+        e.preventDefault();
+        clearTimeout(clickTimer);
+        menu.hidden = false;
+        menu.style.left = "min(" + e.clientX + "px, calc(100vw - 80px))";
+        menu.style.top = e.clientY + "px";
+        menu.onclick = () => { menu.hidden = true; edit(t, c.id); };
+        menu.focus();
+      };
       tabs.set(c.id, t);
     }
     const [kind, text] = words(c);
     t.className = "tab " + (c.agent || "") + " " + (kind !== "done" ? kind : c.unread ? "new" : "read") + (c.id === me ? " me" : "");
-    t.children[1].textContent = c.title;
-    t.title = c.title + (text ? "\\n" + text + (kind === "done" && c.unread ? ", not read" : "") : "");
+    const title = pending.get(c.id)?.title ?? c.title;
+    t.children[1].textContent = title;
+    t.title = title + (text ? "\\n" + text + (kind === "done" && c.unread ? ", not read" : "") : "");
     if (row.children[i] !== t) row.insertBefore(t, row.children[i] || null);
   });
   const ids = chats.map((c) => c.id).join();
@@ -358,6 +427,8 @@ async function poll() {
   busy = false;
   timer = setTimeout(poll, 400);
 }
+menu.onblur = () => { menu.hidden = true; };
+menu.onkeydown = e => { if (e.key === "Escape") menu.hidden = true; };
 document.addEventListener("visibilitychange", poll);
 poll();
 </script></body></html>`;

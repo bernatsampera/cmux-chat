@@ -9,7 +9,7 @@ import { config } from "./config";
 import { spawn } from "node:child_process";
 import { openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { CHATS_FILE, PICK_FILE, STATE_DIR, UUID, ensureStateDir, refuse, run, writePrivate, type Chat, type Project } from "./common";
+import { CHATS_FILE, PICK_FILE, RENAME_FILE, validTitle, STATE_DIR, UUID, ensureStateDir, refuse, run, writePrivate, type Chat, type Project } from "./common";
 
 // The second form is the one-time link, until the page has followed it.
 const PAGE = new RegExp(`^http://127\\.0\\.0\\.1:${Number(process.env.ORCA_CHAT_PORT || 47739)}/(?:[0-9a-f]{64}/follow|cmux-open)\\?cmux=([0-9a-f-]{36})(?:&until=\\d+&sig=[0-9a-f]{64})?$`, "i");
@@ -143,7 +143,7 @@ if (import.meta.main) run(async () => {
   // Closes the pages of terminals that are gone. A terminal can be out of the list for
   // a moment, for example when it moves, so two reads must agree, in the same cmux.
   async function close(all: Tab[]) {
-    const gone = (tabs: Tab[]) => tabs.filter((p) => p.chat && seen.has(p.chat) && pagesOf(tabs, p.workspace).length > 1 && !tabs.some((t) => t.id === p.chat));
+    const gone = (tabs: Tab[]) => tabs.filter((p) => p.chat && seen.has(p.chat) && tabs.some(t => t.workspace === p.workspace && !t.chat) && pagesOf(tabs, p.workspace).length > 1 && !tabs.some((t) => t.id === p.chat));
     const first = gone(all);
     if (!first.length) return;
     await Bun.sleep(300);
@@ -157,6 +157,37 @@ if (import.meta.main) run(async () => {
       if (page.selected && stay) await pair(page.workspace, stay.id);
       await rpc("surface.close", { workspace_id: page.workspace, surface_id: page.id });
     }
+  }
+
+  // Only a full tree can show whether a followed terminal moved to another window.
+  const waiting = new Map<string, number>();
+  let confirmTimer: Timer | undefined;
+  function leftovers(all: Tab[]) {
+    const ids = new Set(all.map(t => t.id));
+    const candidates = new Set(all.map(t => t.workspace).filter(id => UUID.test(id)));
+    // Only a terminal this helper saw alive counts as closed: after a restart of cmux a page can
+    // name a terminal id that cmux never gave out again, and its chat must stay.
+    for (const t of all) if (!t.chat || ids.has(t.chat) || !seen.has(t.chat)) candidates.delete(t.workspace);
+    return candidates;
+  }
+  async function closeWorkspaces(all: Tab[]) {
+    if (!boot) return;
+    const candidates = leftovers(all), now = Date.now();
+    for (const id of waiting.keys()) if (!candidates.has(id)) waiting.delete(id);
+    for (const id of candidates) {
+      const since = waiting.get(id);
+      if (since === undefined) waiting.set(id, now);
+      else if (now - since >= 1500) {
+        if (JSON.parse(await cmux(["events", "--snapshot"])).boot_id !== boot) stop("another cmux");
+        if (leftovers(await read()).has(id)) {
+          await rpc("workspace.close", { workspace_id: id });
+          log("closed leftover chat workspace " + id);
+        }
+        waiting.delete(id);
+      }
+    }
+    clearTimeout(confirmTimer);
+    if (waiting.size) confirmTimer = setTimeout(relist, Math.max(0, Math.min(...waiting.values()) + 1500 - Date.now()));
   }
 
   // The tab of a terminal shows the title that the agent gives it. The page tab gets the same.
@@ -214,12 +245,35 @@ if (import.meta.main) run(async () => {
     work();
   }, 100);
 
+  let renameAt = Date.now(), rename: { workspace: string; title: string } | undefined;
+  setInterval(() => {
+    let request;
+    try { request = JSON.parse(readFileSync(RENAME_FILE, "utf8")); } catch { return; }
+    if (!request || !(request.at > renameAt) || !UUID.test(request.workspace) || !validTitle(request.title)) return;
+    renameAt = request.at;
+    rename = request;
+    work();
+  }, 100);
+
   // One thing at a time: picks first, then the list, then the sweep.
-  let busy = false, due = true, stale = false, fails = 0;
+  let busy = false, due = true, stale = false, fails = 0, silentSince = 0;
   async function work() {
     if (busy) return;
     busy = true;
-    while (wish || picks.size || stale || due) {
+    while (wish || rename || picks.size || stale || due) {
+      if (rename) {
+        const { workspace, title } = rename;
+        rename = undefined;
+        try {
+          const projects = await list(await read());
+          if (projects.some(p => p.chats.some(c => c.workspace === workspace))) {
+            // cmux workspace.rename uses setCustomTitle with its default user source.
+            await rpc("workspace.rename", { workspace_id: workspace, title });
+            stale = true;
+          }
+        } catch (err: any) { log(err?.message ?? String(err)); }
+        continue;
+      }
       const strip = wish;
       wish = undefined;
       if (!strip) await Bun.sleep(40); // a new tab is selected for a moment
@@ -230,17 +284,27 @@ if (import.meta.main) run(async () => {
       try {
         if (strip) await open(strip);
         else if (pick) await pair(...pick);
-        else if (only) await list(await read());
         else {
           const all = await read();
-          fails = 0;
+          fails = 0; silentSince = 0;
           await list(all);
-          await name(all);
-          if (boot) await close(all);
+          await closeWorkspaces(all);
+          if (!only) {
+            await name(all);
+            if (boot) await close(all);
+          }
         }
       } catch (err: any) {
         log(err?.message ?? String(err));
-        if (!strip && !pick && !only && ++fails >= 3) stop("cmux does not answer");
+        // A busy cmux can miss answers for a while. A stop hides the strip of every page until
+        // the next start, so it waits for 2 minutes without any answer.
+        if (!strip && !pick && !only && ++fails >= 3) {
+          silentSince ||= Date.now();
+          if (Date.now() - silentSince > 120_000) stop("cmux does not answer");
+          log("cmux is slow, trying again in 5 s");
+          await Bun.sleep(5_000);
+          due = true;
+        }
       }
     }
     busy = false;
@@ -261,6 +325,9 @@ if (import.meta.main) run(async () => {
   let rest = "";
   const decoder = new TextDecoder();
   log("start");
+  try { boot = JSON.parse(await cmux(["events", "--snapshot"])).boot_id || ""; }
+  catch (err: any) { log(err?.message ?? String(err)); }
+  if (boot) sweep();
   for await (const chunk of events.stdout) {
     const lines = (rest + decoder.decode(chunk, { stream: true })).split("\n");
     rest = lines.pop()!;
