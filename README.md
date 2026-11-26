@@ -6,10 +6,8 @@ Read a Claude Code or Codex conversation above its terminal in cmux. Project tab
 
 Use an Apple silicon Mac with cmux 0.65.x, Git, curl, and Claude Code or Codex on your PATH. The installer downloads a pinned copy of Bun and the cmux chat server. Project setup uses jq and the installed cmux-sidebar sidebar. The file and worktree pickers use fzf, and the Markdown picker also uses fd.
 
-Replace REPO_URL with the address of your copy.
-
 ```sh
-git clone REPO_URL cmux-chat && cd cmux-chat && ./install
+git clone https://github.com/bernatsampera/cmux-chat.git && cd cmux-chat && ./install
 ```
 
 The installer writes both settings files to `~/.config/cmux-chat/`. If you already have a cmux config, merge the rendered cmux.json into it, or run `./install --write-cmux-config` to save a dated backup and use the new file. The Claude settings are available for use with Claude's `--settings` option.
