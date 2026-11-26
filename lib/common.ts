@@ -105,10 +105,20 @@ export const signLink = (token: string, surface: string, until: string) => creat
 
 // ~/.claude/sessions/<pid>.json: Claude Code's own record of a live process. It
 // is undocumented. When it is missing or different, the bridge refuses.
+// A rewrite on a full disk can leave the old file's tail after the new record
+// (for example "}}"), so the longest start that ends in "}" is tried too.
 export function claudeLive(pid: number): { sessionId?: string; kind?: string; status?: string } | null {
+  let text: string;
   try {
-    return JSON.parse(readFileSync(join(CLAUDE_DIR, "sessions", `${pid}.json`), "utf8"));
+    text = readFileSync(join(CLAUDE_DIR, "sessions", `${pid}.json`), "utf8");
   } catch {
     return null;
   }
+  for (let end = text.length, tries = 0; end > 0 && tries < 8; end = text.lastIndexOf("}", end - 2) + 1, tries++) {
+    try {
+      const value = JSON.parse(text.slice(0, end));
+      return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+    } catch {}
+  }
+  return null;
 }

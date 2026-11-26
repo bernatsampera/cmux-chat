@@ -21,6 +21,7 @@
 //   F82 (Codex) A turn that runs, ended, or was interrupted shows another state. A turn of a process that is gone counts. A long turn, a cut line, a new file, or words of the task in a text break it. "Waiting" stays after the answer, or is that of another process.
 //   F80 (the strip) It shows for a chat that is in no group, when the list is missing, broken, or of a helper that is gone, or it goes away after one bad poll. Then the state words must stay. The strip or the words hide a part of the chat. A line between the chat and the terminal.
 //   F81 (the pick) It works without the token, for a foreign Host, Origin, or site, for a POST, for an image or a link in a chat (no header), for a terminal that is not in the list or is of another group. The file can be read by others. The page with the strip can write something else.
+//   F85 A full disk leaves Claude Code's session file with a broken tail ("}}"): the chat says there is no session.
 //   F76 (the flash) The start page of a new chat is white. The frame of a chat shows before it has loaded, the old chat goes away too early, a slow frame that is not wanted any more takes the page, a message stays hidden, or a frame is never shown.
 //   F75 cmux.json: the Codex commands start Codex with the shared daemon (the daemon has the rollout, so there is no chat) or in the alternate screen, or Codex does not start when cmux-chat-open fails.
 //   F13 The pane changes from Claude to Codex: both stores claim it.
@@ -503,6 +504,8 @@ writeFileSync(claudeFile(SC2), claudeLines(SC2, "C2"));
 check("F60", "two surfaces: each shows its own session", (await state(surf.C2)).session === SC2 && (await state(surf.C1)).session === SC1);
 claudeState(PC1, SC1b);
 check("F62", "after /clear: the new session", (await state(surf.C1)).session === SC1b);
+writeFileSync(join(CLAUDE, "sessions", `${PC1}.json`), JSON.stringify({ pid: PC1, sessionId: SC1, cwd: OUT, kind: "interactive", status: "idle", procStart: lstart(PC1) }) + "}");
+check("F85", "a session file with a broken tail (a rewrite on a full disk): the session still shows", (await state(surf.C1)).session === SC1);
 claudeState(PC1, SC1);
 for (const status of ["busy", "idle", "shell", "waiting"]) {
   claudeState(PC1, SC1, { status, statusUpdatedAt: 1234 });
