@@ -90,6 +90,37 @@ const TERMINAL = [
   ".markdown-code{--shiki-token-keyword:#f92672;--shiki-token-function:#a6e22e;--shiki-token-string:#e6db74;--shiki-token-string-expression:#e6db74;--shiki-token-constant:#be84ff;--shiki-token-parameter:#fd971f;--shiki-token-comment:#75715e;--shiki-token-punctuation:#f8f8f2}",
 ].join("");
 
+const BLOCK_STYLE = `
+.markdown-code{position:relative;margin:4px 0 12px;border:1px solid var(--border);border-radius:6px;padding:8px 12px}
+p:has(+ .markdown-code){margin-bottom:4px}
+.markdown-code .code-header{display:contents}
+.markdown-code .code-lang{display:none}
+.markdown-code .code-copy{position:absolute;top:2px;right:2px;z-index:1;opacity:0}
+.markdown-code:hover .code-copy,.markdown-code .code-copy:focus-visible{opacity:1}
+:is(.msg .body .markdown-code,.markdown-code) pre{margin:0;padding:0;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:visible}
+:is(.msg .body .markdown-code,.markdown-code) pre code{display:block;white-space:inherit;overflow-wrap:inherit}
+.markdown-code[data-kind="quote"]{background:none;border:0;border-left:3px solid #6272a4;border-radius:0;padding:2px 0 2px 12px}
+:is(.msg .body .markdown-code,.markdown-code)[data-kind="quote"] :is(pre,pre code,pre span){font:inherit;color:inherit!important;background:none!important}
+`;
+
+const BLOCKS = `<script id="cmux-chat-blocks">(() => {
+  let pending = false;
+  function schedule() {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      for (const block of document.querySelectorAll('.markdown-code')) {
+        const kind = block.querySelector('.code-lang')?.textContent.trim() === 'text' ? 'quote' : 'code';
+        if (block.dataset.kind !== kind) block.dataset.kind = kind;
+      }
+    });
+  }
+  if (typeof MutationObserver === 'function')
+    new MutationObserver(schedule).observe(document, {childList:true, subtree:true, characterData:true});
+  schedule();
+})();</script>`;
+
 // The sidecar scrolls before it knows the final row heights. Follow later growth
 // until the reader scrolls up to read an earlier message.
 const STICK = `<script id="cmux-chat-stick">(() => {
@@ -155,7 +186,7 @@ async function harden(res: Response | undefined, host: string, sidecar = false) 
   if (!res?.headers.get("content-type")?.startsWith("text/html")) return res;
   const headers = new Headers(res.headers);
   headers.set("content-security-policy", `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws://${host}; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'self'`);
-  const text = (await res.text()).replace("</head>", `${sidecar ? STICK : ""}<style>:root{--font-size-base:16px!important;--font-size-code:14px!important}:is(${WIDE}){max-width:none!important;padding-left:16px;padding-right:16px}${TERMINAL}#chat-card{display:none!important}</style></head>`);
+  const text = (await res.text()).replace("</head>", `${sidecar ? STICK + BLOCKS : ""}<style>:root{--font-size-base:16px!important;--font-size-code:14px!important}:is(${WIDE}){max-width:none!important;padding-left:16px;padding-right:16px}${TERMINAL}${sidecar ? BLOCK_STYLE : ""}#chat-card{display:none!important}</style></head>`);
   return new Response(text, { status: res.status, headers });
 }
 
