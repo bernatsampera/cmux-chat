@@ -54,7 +54,7 @@ export async function readProjects(rpc: Rpc, all: Tab[]): Promise<Project[]> {
 const NEW_CHAT = "Claude + chat";
 export const command = () => config("cmux.json").commands.find((c: any) => c.name === NEW_CHAT);
 
-// Async with a hard kill, as orca() in common.ts.
+// Stop the child if cmux takes too long.
 export function connect() {
   const cli = process.env.CMUX_BUNDLED_CLI_PATH || Bun.which("cmux") || refuse("the cmux CLI is not on PATH");
   async function cmux(args: string[], input = ""): Promise<string> {

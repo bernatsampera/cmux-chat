@@ -1,20 +1,16 @@
 #!/usr/bin/env bun
 // orca-chat end to end test.
 //
-// Ways it can fail (written before the code). F = covered below. P = place.e2e.ts, run from here.
+// Ways it can fail (written before the code). F = covered below.
 //
 //   F83 The native menu opens, the wrong tab gets edited, a poll replaces the editor, or a canceled or invalid edit sends a rename. A saved title flashes back or becomes HTML.
 //   F84 A rename bypasses the pick route protections, changes a different project, or writes an invalid or altered title.
 // The chat shows the wrong session
-//   F01 The user switches the terminal tab: the chat does not change, or needs more than 0.5 s.
 //   F02 After /clear or a resume (same process, new session id) the chat shows the old session.
 //   F03 Two agents claim one pane and the chat guesses. The foreground one must win, or none.
 //   F03 A test that runs a fake codex or claude (no session) next to the real agent hides the chat.
 //   F04 A dead process, a reused pid, or a stale session file still counts.
 //   F05 A session that is not interactive, or a nested codex with no tty, takes the pane of its parent.
-//   F06 A tab has two panes: the chat shows the pane that is not active.
-//   F07 A click on the chat makes the chat's own group the followed group.
-//   F08 A markdown or browser tab becomes active and the chat goes away.
 //   F09 A tab with no agent, or a session with no transcript: the chat of another tab stays, or an error.
 //   F10 The session is written after the page loads the frame: the server remembers the miss for 30 s.
 //   F11 Codex has no rollout file open: the chat guesses.
@@ -27,15 +23,11 @@
 //   F81 (the pick) It works without the token, for a foreign Host, Origin, or site, for a POST, for an image or a link in a chat (no header), for a terminal that is not in the list or is of another group. The file can be read by others. The page with the strip can write something else.
 //   F76 (the flash) The start page of a new chat is white. The frame of a chat shows before it has loaded, the old chat goes away too early, a slow frame that is not wanted any more takes the page, a message stays hidden, or a frame is never shown.
 //   F75 cmux.json: the Codex commands start Codex with the shared daemon (the daemon has the rollout, so there is no chat) or in the alternate screen, or Codex does not start when cmux-chat-open fails.
-//   F12 The chat has no split (one group): it follows nothing.
 //   F13 The pane changes from Claude to Codex: both stores claim it.
-//   F14 Orca fails or does not know the worktree: a crash, or a stale chat with no message.
-//   F15 An agent of another tab or worktree is shown.
 // The chat can write
 //   F20 The page has an input box.
-//   F21 A WebSocket message (send, stop, start, fork, handoff, focus-terminal, set-option, delete) reaches Orca or an agent.
+//   F21 A WebSocket message (send, stop, start, fork, handoff, focus-terminal, set-option, delete) reaches an agent.
 //   F22 A POST creates a session or sends a prompt.
-//   F23 The server or the follow page calls the Orca CLI, or a runtime call other than session.tabs.list.
 //   F24 CMUX_BUNDLED_CLI_PATH is a command that works.
 //   F25 A remote image in a reply loads (no policy), or the policy breaks the app (inline style and script, its own WebSocket).
 // Server
@@ -45,23 +37,22 @@
 //   F33 The port is in use by another program: orca-chat must fail.
 //   F34 The token is in the log or in the output, or the state files are world-readable.
 //   F35 The code changed: the old server stays, or the new one gets another port or token.
-//   F36 --stop, or the restart of F35, kills a process that is not the server.
+//   F36 stop, or the restart of F35, kills a process that is not the server.
 //   F37 Transcript events, or new lines, do not arrive (Claude, Codex).
 //   F38 The server starts an agent (claude, codex, opencode, pi), or a child process stays.
-//   F39 orca-chat fails in a new session with no transcript, or with Codex's small environment. Outside Orca it must refuse.
-//   F40 The test touches the real Orca, ~/.cmuxterm, ~/.claude, or the real state dir.
+//   F40 The test touches ~/.cmuxterm, ~/.claude, or the real state dir.
 // cmux: one surface, no following
-//   F60 The chat of one cmux surface shows another surface, another workspace, or an Orca pane. Upper and lower case differ.
-//   F61 CMUX_SURFACE_ID has two values in one process: the chat guesses. Not a UUID, or both cmux and worktree: it answers.
+//   F60 The chat of one cmux surface shows another surface or workspace. Upper and lower case differ.
+//   F61 CMUX_SURFACE_ID has two values in one process: the chat guesses. A missing or invalid cmux id, or a request with worktree, gets a page.
 //   F62 No agent yet, no transcript, /clear, or two agents in one surface: the chat is wrong or stays.
-//   F63 The cmux mode calls Orca, or needs it.
+//   F63 The surface needs an external CLI to find its session.
 //   F64 The cmux mode answers without the token, for a foreign Host, or for a foreign Origin.
-//   F65 A cmux claim removes the claim of an Orca pane, or the Orca mode changes its answer.
+//   F65 Binding one surface changes another surface's claim.
 //   F66 cmux-chat-open navigates or opens something when there is no browser surface, more than one, a dock one, or another workspace answers.
 //   F67 cmux-chat-open blocks claude: cmux hangs, fails, or prints no JSON, the sidecar or cmux is missing, the port is in use, or it is not in cmux.
 //   F68 The token is in an argv, in what cmux gets (cmux keeps each browser.navigate in ~/.cmuxterm/events.jsonl), in the output, or in the log.
 //   F69 The one-time link works twice, after a minute, for another surface, with a forged signature, for a foreign Host, or it is a POST.
-//   F70 A server that starts in cmux with no Orca CLI: the Orca mode stays broken. The environment of the terminal reaches the server.
+//   F70 The terminal environment reaches the server or a second open replaces it.
 //   F71 cmux.json: the chat is below the terminal, the default workspace changes, the schema refuses it, or claude does not start when cmux-chat-open fails. A Claude command is not in the classic mode (in a short fullscreen terminal the / menu is cut).
 //   F73 (the width) A part of the chat keeps the 760 px cap of cmux, so it does not line up with the others.
 //   F72 (the project group) A workspace that is in a group moves. A folder with no project gets a group. /a/b takes /a/bc. The outer project wins. Two groups with one key: it guesses. A worktree outside the folder has no group. A cmux call that hangs or fails stops the chat or claude. It calls anything other than list and add.
@@ -71,8 +62,8 @@
 //   F52 A title or a message from a terminal becomes HTML.
 //
 // Run: bun e2e/e2e.ts   (needs bin/install first)
-// Output: $ORCA_CHAT_E2E_OUT/<time>/result.json, calls.jsonl, server.log, page-follow.html, page-chat.html, cmux-calls.json
-// The Orca CLI, the runtime client, and the cmux CLI are fakes that record their calls. The
+// Output: $ORCA_CHAT_E2E_OUT/<time>/result.json, server.log, page-follow.html, page-chat.html, cmux-calls.json
+// The fake cmux CLI records its calls. The
 // home, the state, and the transcripts are synthetic, in the output dir.
 import { config } from "../lib/config";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -86,11 +77,9 @@ const ROOT = resolve(import.meta.dir, "..");
 const BASE = process.env.ORCA_CHAT_E2E_OUT ?? realpathSync(tmpdir());
 const OUT = join(BASE, new Date().toISOString().replace(/[:.]/g, "-"));
 const HOME = join(OUT, "home"), STATE = join(OUT, "state"), CLAUDE = join(HOME, ".claude"), CODEX = join(HOME, ".codex");
-const RES = join(OUT, "Contents/Resources"), STUB = join(RES, "bin"), CLI = join(RES, "app.asar.unpacked/out/cli");
-const CALLS = join(OUT, "calls.jsonl"), DB = join(OUT, "orca.json");
 const DATA = process.env.ORCA_CHAT_DATA_DIR ?? join(homedir(), ".local/share/orca-chat");
 const PROJ = join(CLAUDE, "projects/-e2e"), DAY = join(CODEX, "sessions/2026/01/02");
-for (const dir of [join(CLAUDE, "sessions"), PROJ, DAY, STUB, CLI]) mkdirSync(dir, { recursive: true });
+for (const dir of [join(CLAUDE, "sessions"), PROJ, DAY]) mkdirSync(dir, { recursive: true });
 
 // ---- checks ----
 const results: { id: string; check: string; ok: boolean; evidence?: unknown }[] = [];
@@ -121,56 +110,33 @@ const realPaths = [".local/state/orca-chat", ".cmuxterm", ".cache/cmux-agent-cha
 const snapshot = () => JSON.stringify(realPaths.map((p) => (existsSync(p) ? statSync(p).mtimeMs : null)));
 const realBefore = snapshot();
 
-// ---- fake Orca: CLI and runtime client over one JSON file ----
-const WT = "id:repo-1::/tmp/my wt";
 const uuid = () => crypto.randomUUID();
-const leaf = { A: uuid(), B: uuid(), X: uuid(), SHELL: uuid(), P1: uuid(), P2: uuid(), OTHER: uuid() };
-const term = (tab: string, l: string, title = `title ${tab}`) => ({ id: `${tab}::${l}`, type: "terminal", parentTabId: tab, leafId: l, title, parentLayout: { activeLeafId: leaf.P2 } });
-const TABS = [term("TA", leaf.A), term("TB", leaf.B, "<img src=x onerror=alert(1)>"), term("TX", leaf.X), term("TS", leaf.SHELL), term("TP", leaf.P1), term("TP", leaf.P2), { id: "MD", type: "markdown" }, { id: "WEB", type: "browser", url: "https://example.com/follow?" }];
-const G1 = ["TA", "TB", "TX", "TS", "TP", "MD", "WEB"];
-let follow = "";
-const FOLLOW = () => ({ id: "CHAT", type: "browser", browserPageId: "page-chat", url: follow });
-// A click on a terminal pane, or on another tab, in the terminal group.
-function activate(tab: string, l?: string, extra: object = {}) {
-  const id = l ? `${tab}::${l}` : tab;
-  writeFileSync(DB, JSON.stringify({ activeGroupId: "G1", activeTabId: id, tabGroups: [{ id: "G0", activeTabId: "CHAT", tabOrder: ["CHAT"] }, { id: "G1", activeTabId: tab, tabOrder: G1 }], tabs: [...TABS, FOLLOW()], ...extra }));
-}
-activate("TA", leaf.A);
-const rec = `const fs=require("fs");const note=(c)=>fs.appendFileSync(${JSON.stringify(CALLS)},JSON.stringify({pid:process.pid,ppid:process.ppid,...c})+"\\n");const db=()=>JSON.parse(fs.readFileSync(${JSON.stringify(DB)},"utf8"));`;
-writeFileSync(join(CLI, "runtime-client.js"), `${rec}exports.RuntimeClient=class{async call(m,p){note({rpc:m});const d=db();if(d.fail)throw Error("orca is off");if(m!=="session.tabs.list"||p.worktree!==${JSON.stringify(WT)})throw Error("selector_not_found");return{result:d}}}`);
-writeFileSync(join(STUB, "orca"), `#!${process.execPath}
-${rec}const argv=process.argv.slice(2);note({argv});
-const terminals=db().tabs.filter(t=>t.type==="terminal").map(t=>({handle:"term_"+t.parentTabId,tabId:t.parentTabId,leafId:t.leafId,connected:true,writable:true,worktreeId:${JSON.stringify(WT.slice(3))}}));
-console.log(JSON.stringify({ok:true,result:argv[1]==="list"?{terminals,truncated:false}:{browserPageId:"page-chat"}}));`);
-chmodSync(join(STUB, "orca"), 0o755);
-const calls = (): any[] => (existsSync(CALLS) ? readFileSync(CALLS, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
-
+const surface = { A: uuid(), B: uuid(), X: uuid(), SHELL: uuid() };
 // ---- synthetic transcripts ----
 const claudeFile = (id: string) => join(PROJ, `${id}.jsonl`);
 const claudeLines = (id: string, text: string, image = "") => [
   { type: "user", uuid: uuid(), sessionId: id, cwd: OUT, timestamp: new Date().toISOString(), message: { role: "user", content: `question ${text}` } },
   { type: "assistant", uuid: uuid(), sessionId: id, cwd: OUT, timestamp: new Date().toISOString(), message: { id: `msg_${text}`, role: "assistant", content: [{ type: "text", text: `answer ${text} ${image}` }] } },
 ].map((l) => JSON.stringify(l) + "\n").join("");
-const SA = uuid(), SA2 = uuid(), SB = uuid(), SX = uuid(), SX2 = uuid(), SP1 = uuid(), SP2 = uuid(), SO = uuid();
-for (const [id, text] of [[SA, "A"], [SA2, "A2"], [SP1, "P1"], [SP2, "P2"], [SO, "other"]]) writeFileSync(claudeFile(id), claudeLines(id, text, "![x](https://evil.example/x.png)"));
+const SA = uuid(), SA2 = uuid(), SB = uuid(), SX = uuid(), SX2 = uuid(), SP2 = uuid();
+for (const [id, text] of [[SA, "A"], [SA2, "A2"], [SP2, "P2"]]) writeFileSync(claudeFile(id), claudeLines(id, text, "![x](https://evil.example/x.png)"));
 const rollout = (id: string) => join(DAY, `rollout-2026-01-02T00-00-00-${id}.jsonl`);
 const codexMessage = (text: string) => JSON.stringify({ timestamp: new Date().toISOString(), type: "response_item", payload: { type: "message", role: "assistant", content: [{ type: "output_text", text }] } }) + "\n" + JSON.stringify({ timestamp: new Date().toISOString(), type: "event_msg", payload: { type: "agent_message", message: text } }) + "\n";
 for (const id of [SX, SX2]) writeFileSync(rollout(id), JSON.stringify({ timestamp: new Date().toISOString(), type: "session_meta", payload: { id, cwd: OUT } }) + "\n" + codexMessage("codex answer"));
 
 // ---- fake agents ----
 const port = await new Promise<number>((r) => { const s = createServer().listen(0, "127.0.0.1", () => { const p = (s.address() as any).port; s.close(() => r(p)); }); });
-const small = { HOME, PATH: `${STUB}:${join(homedir(), ".bun/bin")}:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin`, ORCA_CHAT_STATE_DIR: STATE, ORCA_CHAT_DATA_DIR: DATA, ORCA_CHAT_PORT: String(port), CLAUDE_CONFIG_DIR: CLAUDE, CODEX_HOME: CODEX };
-const base = { ...small, ORCA_CLI_BIN_DIR: STUB };
-const paneOf = (l: string) => ({ ORCA_PANE_KEY: `${uuid()}:${l}` });
+const small = { HOME, PATH: `${join(homedir(), ".bun/bin")}:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin`, ORCA_CHAT_STATE_DIR: STATE, ORCA_CHAT_DATA_DIR: DATA, ORCA_CHAT_PORT: String(port), CLAUDE_CONFIG_DIR: CLAUDE, CODEX_HOME: CODEX };
+const inCmux = (s: string) => ({ CMUX_SURFACE_ID: s.toUpperCase(), CMUX_WORKSPACE_ID: uuid().toUpperCase() });
 let n = 0;
 // Runs `code` in a process of its own: with a terminal (foreground) or without one.
-async function agent(l: string, name: "claude" | "codex", tty: boolean, code = "", pane: Record<string, string> = paneOf(l)): Promise<number> {
+async function agent(surfaceId: string, name: "claude" | "codex", tty: boolean, code = "", extraEnv: Record<string, string> = {}): Promise<number> {
   const id = ++n, pidFile = join(OUT, `agent-${id}.pid`), script = join(OUT, `agent-${id}.js`), dir = join(OUT, "agents");
   mkdirSync(dir, { recursive: true });
   const exe = join(dir, name);
   if (!existsSync(exe)) symlinkSync(process.execPath, exe);
   writeFileSync(script, `const fs=require("fs");${code};fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));setInterval(()=>{},1000);`);
-  const env = { ...base, ...pane };
+  const env = { ...small, ...inCmux(surfaceId), ...extraEnv };
   const c = tty ? spawn("/usr/bin/script", ["-q", "/dev/null", exe, script], { env, stdio: "ignore" }) : spawn(exe, [script], { env, stdio: "ignore", detached: true });
   children.push(c);
   const pid = Number(await until(() => existsSync(pidFile) && readFileSync(pidFile, "utf8")));
@@ -178,17 +144,15 @@ async function agent(l: string, name: "claude" | "codex", tty: boolean, code = "
   return pid;
 }
 const claudeState = (pid: number, sessionId: string, extra = {}) => writeFileSync(join(CLAUDE, "sessions", `${pid}.json`), JSON.stringify({ pid, sessionId, cwd: OUT, kind: "interactive", status: "idle", procStart: lstart(pid), ...extra }));
-async function claude(l: string, sessionId: string, tty = false, extra = {}, pane = paneOf(l) as Record<string, string>) {
-  const pid = await agent(l, "claude", tty, "", pane);
+async function claude(surfaceId: string, sessionId: string, tty = false, extra = {}, extraEnv: Record<string, string> = {}) {
+  const pid = await agent(surfaceId, "claude", tty, "", extraEnv);
   claudeState(pid, sessionId, extra);
   return pid;
 }
 const openRollouts = (...ids: string[]) => ids.map((id) => `fs.openSync(${JSON.stringify(rollout(id))},"a")`).join(";");
-const PA = await claude(leaf.A, SA);
-await claude(leaf.B, SB); // no transcript yet
-await claude(leaf.P1, SP1);
-await claude(leaf.OTHER, SO); // a pane of another worktree
-const chat = (env: Record<string, string>, ...args: string[]) => exec(env, join(ROOT, "bin/orca-chat"), ...args);
+const PA = await claude(surface.A, SA);
+await claude(surface.B, SB); // no transcript yet
+const chat = (env: Record<string, string>, phase = "cmux") => exec(env, "/usr/bin/lockf", "-k", "-t", "10", join(STATE, "lock"), process.execPath, join(ROOT, "lib/chat.ts"), phase);
 function exec(env: Record<string, string>, command: string, ...args: string[]) {
   return new Promise<{ code: number | null; out: string; err: string }>((done) => {
     const c = spawn(command, args, { env, stdio: ["ignore", "pipe", "pipe"], cwd: OUT });
@@ -198,29 +162,20 @@ function exec(env: Record<string, string>, command: string, ...args: string[]) {
     c.on("close", (code) => done({ code, out: out.trim(), err: err.trim() }));
   });
 }
-const eB = { ...base, ...paneOf(leaf.B) };
-
-// ---- F39 F33 F32 start ----
-// A process of launchd: this test itself can run inside a real Orca pane.
-const outside = join(OUT, "outside.txt");
-spawnSync("/bin/bash", ["-c", `(sleep 0.3; "$1" --no-open >"$2" 2>&1; echo "exit $?" >>"$2") >/dev/null 2>&1 &`, "bash", join(ROOT, "bin/orca-chat"), outside], { env: base, stdio: "ignore" });
-await until(() => existsSync(outside) && /exit \d/.test(readFileSync(outside, "utf8")));
-let r = { code: /exit 0/.test(readFileSync(outside, "utf8")) ? 0 : 1, out: "", err: readFileSync(outside, "utf8") } as { code: number | null; out: string; err: string };
-check("F39", "outside an Orca pane: refused", r.code !== 0 && /no Orca pane/.test(r.err), r);
+mkdirSync(STATE, { mode: 0o700 });
 const blocker = Bun.listen({ hostname: "127.0.0.1", port, socket: { data() {} } });
-r = await chat(eB, "--no-open");
+let r = await chat(small);
 check("F33", "the port is in use: refused", r.code !== 0 && /in use/.test(r.err), r);
 blocker.stop(true);
 await Bun.sleep(300);
-const [a, b] = await Promise.all([chat(eB, "--no-open"), chat({ ...base, ...paneOf(leaf.A) }, "--no-open")]);
-check("F39", "it starts in a session with no transcript", a.code === 0, a.err);
-check("F32", "two parallel runs give the same URL", b.code === 0 && a.out === b.out, [a, b].map((x) => ({ code: x.code, err: x.err })));
-follow = a.out;
-const url = new URL(a.out), token = url.pathname.split("/")[1];
+const [a, b] = await Promise.all([chat(small), chat(small)]);
+check("F32", "two parallel starts return the same server", a.code === 0 && b.code === 0 && a.out === b.out, [a.err, b.err]);
+const url = new URL(a.out), token = url.pathname.slice(1);
+url.searchParams.set("cmux", surface.A);
 const launch = () => JSON.parse(readFileSync(join(STATE, "launch.json"), "utf8"));
 let serverPid = launch().pid;
-r = await chat(eB, "--no-open", "--agent", "claude", "--session", "ignored1");
-check("F32", "a second run keeps the server and the URL, old options are accepted", r.out === a.out && launch().pid === serverPid, r.code);
+r = await chat(small);
+check("F32", "a second start keeps the server and token", r.out === a.out && launch().pid === serverPid);
 const listen = () => spawnSync("/usr/sbin/lsof", ["-nP", `-iTCP:${port}`, "-sTCP:LISTEN"], { encoding: "utf8" }).stdout.trim().split("\n").slice(1);
 check("F31", "one listener, on 127.0.0.1 only", listen().length === 1 && listen()[0].includes(`127.0.0.1:${port}`) && listen()[0].includes(` ${serverPid} `), listen());
 
@@ -232,7 +187,7 @@ const get = (path: string, headers: Record<string, string> = {}, method = "GET",
   q.end(body);
 });
 const STATE_URL = `/${token}/follow/state${url.search}`;
-const state = async (): Promise<{ session: string | null; title: string; message: string | null }> => JSON.parse((await get(STATE_URL)).body);
+const state = async (id: string = surface.A): Promise<{ session: string | null; title: string; message: string | null }> => JSON.parse((await get(`/${token}/follow/state?cmux=${id}`)).body);
 const store = (name: string) => (existsSync(join(STATE, `${name}-hook-sessions.json`)) ? JSON.parse(readFileSync(join(STATE, `${name}-hook-sessions.json`), "utf8")) : { sessions: {}, activeSessionsBySurface: {} });
 const open = async (sessionId: string) => {
   const events: any[] = [];
@@ -244,38 +199,20 @@ const open = async (sessionId: string) => {
   return { ws, events, op: (msg: object) => ws.send(JSON.stringify({ sessionId, ...msg })) };
 };
 
-// ---- F01 F09 F10 F15 follow ----
+// ---- session lookup and transcript history ----
 let s = await state();
-check("F01", "tab A shows the session of tab A", s.session === SA && s.title === "title TA" && s.message === null, s);
 const c1 = await open(`t-${SA}`);
 check("F10", "the session is in the store before the frame loads: history at once", c1.events.some((e) => e.kind === "history") && Boolean(await until(() => JSON.stringify(c1.events).includes("answer A"), 5_000)), c1.events.map((e) => e.kind));
-activate("TB", leaf.B);
-s = await state();
+s = await state(surface.B);
 check("F09", "tab B has a session with no transcript: a message, no other chat", s.session === null && /no transcript yet/.test(s.message!), s);
 writeFileSync(claudeFile(SB), claudeLines(SB, "B"));
-s = await state();
+s = await state(surface.B);
 check("F09", "tab B shows its session when the transcript exists, with no command", s.session === SB, s);
-activate("TS", leaf.SHELL);
-s = await state();
+s = await state(surface.SHELL);
 check("F09", "a shell: a message", s.session === null && /No Claude Code or Codex/.test(s.message!), s);
-const times: number[] = [];
-let right = true;
-for (let i = 0; i < 10; i++) {
-  activate(i % 2 ? "TA" : "TB", i % 2 ? leaf.A : leaf.B);
-  const t = performance.now();
-  right &&= (await state()).session === (i % 2 ? SA : SB);
-  times.push(Math.round(performance.now() - t));
-}
-check("F01", "10 switches: always the right session, under 100 ms each (plus a poll of 400 ms)", right && Math.max(...times) < 100, times);
-activate("GONE", leaf.OTHER);
-s = await state();
-check("F15", "a pane that is not in this worktree is never shown", s.session === null, s);
-
-// ---- F02 /clear and resume ----
-activate("TA", leaf.A);
 claudeState(PA, SA2);
 s = await state();
-check("F02", "after /clear: the new session, at the next poll", s.session === SA2 && store("claude").activeSessionsBySurface[leaf.A].sessionId === SA2, s);
+check("F02", "after /clear: the new session, at the next poll", s.session === SA2 && store("claude").activeSessionsBySurface[surface.A].sessionId === SA2, s);
 claudeState(PA, SA);
 check("F02", "after a resume: the old session again", (await state()).session === SA);
 
@@ -285,13 +222,13 @@ check("F04", "a reused pid (other start time) does not count", (await state()).s
 claudeState(PA, SA, { kind: "bg" });
 check("F05", "a session that is not interactive does not count", (await state()).session === null);
 claudeState(PA, SA);
-const twin = await claude(leaf.A, SA2);
+const twin = await claude(surface.A, SA2);
 s = await state();
 check("F03", "two agents, none in the foreground: a message", s.session === null && /More than one agent/.test(s.message!), s);
-const front = await claude(leaf.A, SP2, true);
+const front = await claude(surface.A, SP2, true);
 s = await state();
 check("F03", "two agents, one in the foreground: that one", s.session === SP2, { s, stat: spawnSync("/bin/ps", ["-o", "stat=,tty=", "-p", String(front)], { encoding: "utf8" }).stdout });
-const fakeCodex = await agent(leaf.A, "codex", true);
+const fakeCodex = await agent(surface.A, "codex", true);
 await Bun.sleep(1_700); // the list of codex processes is 1.5 s old at most
 s = await state();
 check("F03", "and a codex with no session in the foreground (a test run): still that one", s.session === SP2, s);
@@ -300,78 +237,36 @@ await until(() => !alive(twin) && !alive(front) && !alive(fakeCodex));
 s = await state();
 check("F04", "dead processes do not count, their files are still there", s.session === SA && existsSync(join(CLAUDE, "sessions", `${twin}.json`)), s);
 
-// ---- F06 panes, F07 F08 F12 groups ----
-activate("TP", leaf.P1);
-check("F06", "two panes: the active one", (await state()).session === SP1);
-const chatActive = (tab: string) => activate(tab, undefined, { activeGroupId: "G0", activeTabId: "CHAT" });
-chatActive("TP");
-check("F06", "two panes, the chat has the focus: the pane with the agent", (await state()).session === SP1);
-const PP2 = await claude(leaf.P2, SP2);
-check("F06", "two panes with agents, the chat has the focus: the pane that was active in the tab", (await state()).session === SP2);
-process.kill(PP2, "SIGKILL");
-chatActive("TB");
-check("F07", "the chat has the focus: it still follows the terminal group", (await state()).session === SB);
-const twoGroups = (active: string) => activate("TA", undefined, { activeGroupId: active, activeTabId: active === "G0" ? "CHAT" : "TB", tabGroups: [{ id: "G0", activeTabId: "CHAT", tabOrder: ["CHAT"] }, { id: "G1", activeTabId: "TA", tabOrder: ["TA"] }, { id: "G2", activeTabId: "TB", tabOrder: ["TB"] }] });
-twoGroups("G2");
-const g2 = (await state()).session;
-twoGroups("G0");
-check("F07", "two terminal groups, then a click on the chat: the last one stays", g2 === SB && (await state()).session === SB, g2);
-activate("MD");
-s = await state();
-check("F08", "a markdown tab: keep", s.session === null && s.message === null, s);
-activate("WEB");
-s = await state();
-check("F08", "another browser tab: keep", s.session === null && s.message === null, s);
-activate("CHAT", undefined, { tabGroups: [{ id: "G1", activeTabId: "CHAT", tabOrder: [...G1, "CHAT"], recentTabIds: ["TA", "TB", "CHAT"] }] });
-check("F12", "no split: the tab before the chat", (await state()).session === SB);
-
-// ---- F14 Orca fails ----
-activate("TA", leaf.A, { fail: true });
-s = await state();
-check("F14", "Orca does not answer: a message", s.session === null && /orca is off/.test(s.message!), s);
-activate("TA", leaf.A);
-const unknown = JSON.parse((await get(`/${token}/follow/state?worktree=id:nope`)).body);
-check("F14", "an unknown worktree: a message", unknown.session === null && Boolean(unknown.message), unknown);
-check("F14", "a worktree that is not an id: refused", (await get(`/${token}/follow/state?worktree=active`)).status === 400 && (await get(`/${token}/follow`)).status === 400);
-check("F14", "then it works again", (await state()).session === SA);
-
-// ---- F05 F11 F13 F37 F39 codex ----
-activate("TX", leaf.X);
 const SLOW = 2_500; // the list of codex processes is read every 1.5 s
-const nested = await agent(leaf.X, "codex", false, openRollouts(SX));
+const nested = await agent(surface.X, "codex", false, openRollouts(SX));
 await Bun.sleep(SLOW);
-s = await state();
+s = await state(surface.X);
 check("F05", "a codex with no tty does not count", s.session === null && /No Claude Code or Codex/.test(s.message!), s);
 process.kill(nested, "SIGKILL");
-const fresh = await agent(leaf.X, "codex", true);
-s = (await until(async () => { const x = await state(); return /no transcript/.test(x.message ?? "") && x; }, SLOW)) ?? (await state());
+const fresh = await agent(surface.X, "codex", true);
+s = (await until(async () => { const x = await state(surface.X); return /no transcript/.test(x.message ?? "") && x; }, SLOW)) ?? (await state(surface.X));
 check("F11", "codex with no rollout file open: a message", /no transcript yet/.test(s.message ?? ""), s);
 process.kill(fresh, "SIGKILL");
 const SUB = uuid(), BAD = uuid(), at = (id: string, t: number) => utimesSync(rollout(id), t, t);
 writeFileSync(rollout(SUB), JSON.stringify({ type: "session_meta", payload: { id: SUB, cwd: OUT, base_instructions: { text: "x".repeat(30_000) }, source: { subagent: { other: "guardian" } } } }) + "\n");
 writeFileSync(rollout(BAD), '{"type":"session_meta","payl');
 at(SX, 1000); at(SX2, 2000); at(SUB, 3000); at(BAD, 500);
-const two = await agent(leaf.X, "codex", true, openRollouts(SX, SX2, SUB, BAD));
-const shows = async (id: string | null) => (await until(async () => { const x = await state(); return x.session === id && (id || x.message) && x; }, SLOW)) ?? (await state());
+const two = await agent(surface.X, "codex", true, openRollouts(SX, SX2, SUB, BAD));
+const shows = async (id: string | null) => (await until(async () => { const x = await state(surface.X); return x.session === id && (id || x.message) && x; }, SLOW)) ?? (await state(surface.X));
 s = await shows(SX2);
 check("F74", "two rollout files, a subagent, and a bad one: the one that Codex wrote last, not the subagent", s.session === SX2, s);
 at(SX, 4000);
 s = await shows(SX);
 check("F74", "the old conversation is written again (/resume): the chat follows", s.session === SX, s);
 process.kill(two, "SIGKILL");
-const subOnly = await agent(leaf.X, "codex", true, openRollouts(SUB));
+const subOnly = await agent(surface.X, "codex", true, openRollouts(SUB));
 await Bun.sleep(SLOW);
-s = await state();
+s = await state(surface.X);
 check("F74", "only a subagent file: a message", s.session === null && /no transcript yet/.test(s.message ?? ""), s);
 process.kill(subOnly, "SIGKILL");
-const result = join(OUT, "codex-run.json");
-const inCodex = `setTimeout(()=>{const r=require("child_process").spawnSync(${JSON.stringify(join(ROOT, "bin/orca-chat"))},["--no-open"],{env:${JSON.stringify(small)},encoding:"utf8"});fs.writeFileSync(${JSON.stringify(result)},JSON.stringify({code:r.status,out:r.stdout.trim(),err:r.stderr}))},300)`;
-const PX = await agent(leaf.X, "codex", true, `${openRollouts(SX)};${inCodex}`);
-s = (await until(async () => { const x = await state(); return x.session && x; }, SLOW)) ?? (await state());
+const PX = await agent(surface.X, "codex", true, openRollouts(SX));
+s = (await until(async () => { const x = await state(surface.X); return x.session && x; }, SLOW)) ?? (await state(surface.X));
 check("F11", "codex with one rollout file open: its session", s.session === SX, s);
-await until(() => existsSync(result));
-const small1 = JSON.parse(readFileSync(result, "utf8"));
-check("F39", "orca-chat inside Codex, with no ORCA_* variables in its environment", small1.code === 0 && small1.out === a.out, { code: small1.code, err: small1.err });
 const c2 = await open(`t-${SX}`);
 check("F37", "Codex transcript events arrive", Boolean(await until(() => JSON.stringify(c2.events).includes("codex answer"), 5_000)), c2.events.map((e) => e.kind));
 const liveA = `live ${uuid()}`, liveX = `live ${uuid()}`;
@@ -381,10 +276,9 @@ check("F37", "new lines arrive live (Claude, Codex)", Boolean(await until(() => 
 // The same pane: Codex ends, Claude starts.
 process.kill(PX, "SIGKILL");
 await until(() => !alive(PX));
-await claude(leaf.X, SP2);
-s = await state();
-check("F13", "the pane changes from Codex to Claude: one claim in the stores", s.session === SP2 && store("claude").activeSessionsBySurface[leaf.X]?.sessionId === SP2 && !store("codex").activeSessionsBySurface[leaf.X], { s, codex: store("codex").activeSessionsBySurface });
-activate("TA", leaf.A);
+await claude(surface.X, SP2);
+s = await state(surface.X);
+check("F13", "the pane changes from Codex to Claude: one claim in the stores", s.session === SP2 && store("claude").activeSessionsBySurface[surface.X]?.sessionId === SP2 && !store("codex").activeSessionsBySurface[surface.X], { s, codex: store("codex").activeSessionsBySurface });
 
 // ---- F30 F20 F25 ----
 const upgrade = { connection: "Upgrade", upgrade: "websocket", "sec-websocket-version": "13", "sec-websocket-key": "dGhlIHNhbXBsZSBub25jZQ==" };
@@ -417,8 +311,8 @@ check("F25", "the app loads only its own files, no eval, no wasm, no worker, no 
 const perm = (p: string) => (statSync(p).mode & 0o777).toString(8);
 check("F34", "the state dir is 0700 and its files are 0600", perm(STATE) === "700" && readdirSync(STATE).filter((f) => f !== "lock" && f !== "server.json").every((f) => perm(join(STATE, f)) === (f === "live" ? "700" : "600")), readdirSync(STATE).map((f) => [f, perm(join(STATE, f))]));
 
-// ---- F21 F22 F23 F24 F38 sending is impossible ----
-const before = calls().length, sessionsBefore = (await get(`/${token}/api/sessions`)).body;
+// ---- F21 F22 F24 F38 sending is impossible ----
+const sessionsBefore = (await get(`/${token}/api/sessions`)).body;
 for (const op of ["send", "stop", "fork", "handoff", "focus-terminal", "delete"]) for (const c of [c1, c2]) c.op({ op, prompt: "must not arrive", requestId: uuid() });
 c1.op({ op: "set-option", id: "model", value: "x" });
 for (const provider of ["claude", "codex", "opencode", "pi"]) c1.op({ op: "start", provider, prompt: "must not run", cwd: OUT, autoApprove: true });
@@ -426,13 +320,9 @@ for (const raw of ["", "null", "[]", "{", '{"op":["send"]}', '{"op":"Send"}', '{
 const posts = await Promise.all([["POST", "/api/sessions"], ["PUT", "/api/sessions"], ["POST", "/api/theme"], ["POST", "/follow/state"], ["DELETE", "/api/sessions"]].map(([m, p]) => get(`/${token}${p}`, { "content-type": "application/json" }, m, JSON.stringify({ provider: "pi", prompt: "must not run", cwd: OUT }))));
 check("F22", "every request that is not GET is refused", posts.every((p) => p.status === 405 || p.status === 403), posts.map((p) => p.status));
 await Bun.sleep(3_000);
-const after = calls().slice(before);
-check("F21", "no WebSocket message made a call to Orca, or a session", after.length === 0 && (await get(`/${token}/api/sessions`)).body === sessionsBefore, after);
+check("F21", "WebSocket messages create no session", (await get(`/${token}/api/sessions`)).body === sessionsBefore);
 c1.op({ op: "subscribe" });
 check("F21", "the server is alive and still answers the chat", (await get(`/${token}/api/sessions`)).status === 200 && launch().pid === serverPid && c1.ws.readyState === 1);
-check("F23", "the server made only session.tabs.list calls, and no CLI call", calls().filter((c) => c.pid === serverPid || c.ppid === serverPid).every((c) => c.rpc === "session.tabs.list") && calls().some((c) => c.pid === serverPid), calls().filter((c) => (c.pid === serverPid || c.ppid === serverPid) && c.rpc !== "session.tabs.list"));
-const sends = calls().filter((c) => c.argv && !["list"].includes(c.argv[1]));
-check("F23", "in the whole run the CLI was called for nothing but terminal list", sends.length === 0, sends);
 const envLine = spawnSync("/bin/ps", ["-Eww", "-o", "command=", "-p", String(serverPid)], { encoding: "utf8" }).stdout.match(/CMUX_BUNDLED_CLI_PATH=(\S+)/)?.[1] ?? "";
 const bundled = spawnSync(envLine, ["rpc", "mobile.chat.send", "{}"]);
 check("F24", "the bundled CLI of the server is a command that fails", envLine === "/usr/bin/false" && bundled.status === 1, { envLine, status: bundled.status });
@@ -472,22 +362,19 @@ const pageFetch = async (path: string, init: any) => {
     inFlight--;
   }
 };
-new Function("document", "location", "fetch", "setTimeout", "clearTimeout", script)(doc, { search: url.search + "&cmux=ME" }, pageFetch, (fn: Function, ms: number) => timers.push(Object.assign(fn, { ms })), () => {});
+new Function("document", "location", "fetch", "setTimeout", "clearTimeout", script)(doc, { search: "?cmux=ME" }, pageFetch, (fn: Function, ms: number) => timers.push(Object.assign(fn, { ms })), () => {});
 const tick = async () => { const before = timers.length; timers.at(-1)?.(); await until(() => timers.length > before, 3_000); };
 await until(() => timers.length > 0);
 const visible = () => frames.filter((f) => f.className === "on").map((f) => f.src);
 check("F50", "the page shows the frame of the active session, next poll in 400 ms", JSON.stringify(visible()) === JSON.stringify([`s/t-${SA}`]) && (timers.at(-1) as any).ms === 400, { src: visible(), note: noteEl.textContent });
 const frameA = frames[0];
-activate("TB", leaf.B);
+fake = { ...(await state(surface.B)), title: "<img src=x onerror=alert(1)>" };
 await tick();
 check("F52", "a title with HTML stays text", visible()[0] === `s/t-${SB}` && doc.title === "Chat: <img src=x onerror=alert(1)>" && !/innerHTML|insertAdjacent|document\.write/.test(script), doc.title);
-activate("TA", leaf.A);
+fake = null;
 await tick();
 check("F50", "back to tab A: the same frame, visible again, not a new one", visible()[0] === `s/t-${SA}` && frames.includes(frameA) && made.length === 2, made.map((f) => f.src));
-activate("MD");
-await tick();
-check("F08", "the page keeps the chat for a markdown tab", visible()[0] === `s/t-${SA}`);
-activate("TS", leaf.SHELL);
+fake = await state(surface.SHELL);
 await tick();
 check("F77", "one poll with no session: the chat stays", visible()[0] === `s/t-${SA}` && noteEl.textContent === "", noteEl.textContent);
 for (let i = 0; i < 4; i++) await tick();
@@ -528,7 +415,7 @@ check("F80", "no chats: no strip, and the words stay", (await barOf({})) === "" 
   check("F80", "one bad poll: the strip stays", ids.tabs.children.length === 1 && ids.bar.className.startsWith("tabs"), ids.bar.className);
   sent.length = 0;
   first.onclick(); ids.plus.onclick(); ids.plus.onclick();
-  check("F79", "a click sends the chat and the header, a double click on the plus one new chat", sent.length === 2 && sent[0].path === `follow/pick${url.search}&cmux=ME&to=a` && sent[1].path.endsWith("&to=new") && sent.every((x) => x.init.headers["x-orca-chat"] === "pick"), sent);
+  check("F79", "a click sends the chat and the header, a double click on the plus one new chat", sent.length === 2 && sent[0].path === `follow/pick?cmux=ME&to=a` && sent[1].path.endsWith("&to=new") && sent.every((x) => x.init.headers["x-orca-chat"] === "pick"), sent);
   await barOf({ chats: [c("a", { workspace: "wa" }), c("me", { workspace: "wm" })] });
   sent.length = 0;
   let prevented = false;
@@ -593,70 +480,55 @@ timers.at(-1)!();
 await Bun.sleep(100);
 check("F51", "it polls at once when visible, and never two at the same time", fetches === hiddenFrom + 1 && most === 1, { fetches: fetches - hiddenFrom, most });
 
-// ---- open: one real run of the placement through the CLI ----
-activate("TA", leaf.A, { tabs: [...TABS, FOLLOW()] });
-const openFrom = calls().length;
-r = await chat({ ...base, ...paneOf(leaf.A) });
-const opened = calls().slice(openFrom);
-check("open", "orca-chat reuses the follow tab: no create, no move, only the focus of this terminal", r.code === 0 && opened.filter((c) => c.argv && c.argv[1] !== "list").every((c) => c.argv.join(" ") === "terminal switch --terminal=term_TA --json") && opened.every((c) => !c.rpc || c.rpc === "session.tabs.list"), { r, opened: opened.map((c) => c.argv ?? c.rpc) });
-check("F34", "the output of that run does not show the token", !(r.out + r.err).includes(token));
-
 // ---- F60 to F65 the follow mode of one cmux surface ----
-const surf = { C1: uuid(), C2: uuid(), ORCA: uuid(), TWO: uuid(), X: uuid(), EMPTY: uuid() };
-const inCmux = (s: string) => ({ CMUX_SURFACE_ID: s.toUpperCase(), CMUX_WORKSPACE_ID: uuid().toUpperCase() });
+const surf = { C1: uuid(), C2: uuid(), TWO: uuid(), X: uuid(), EMPTY: uuid() };
 const q1 = `?cmux=${surf.C1}`;
-const cmuxState = async (s: string) => JSON.parse((await get(`/${token}/follow/state?cmux=${s}`)).body) as Awaited<ReturnType<typeof state>>;
 const SC1 = uuid(), SC1b = uuid(), SC2 = uuid(), SC3 = uuid(), SC4 = uuid();
 for (const [id, text] of [[SC1, "C1"], [SC1b, "C1b"], [SC3, "C3"], [SC4, "C4"]]) writeFileSync(claudeFile(id), claudeLines(id, text));
-activate("TA", leaf.A);
 await state();
-const orcaClaim = JSON.stringify(store("claude").activeSessionsBySurface[leaf.A]);
-const cmuxFrom = calls().length;
-s = await cmuxState(surf.C1);
+const firstClaim = JSON.stringify(store("claude").activeSessionsBySurface[surface.A]);
+s = await state(surf.C1);
 check("F62", "a surface with no agent: a message", s.session === null && /No Claude Code or Codex/.test(s.message!), s);
-const PC1 = await claude("", SC1, true, {}, inCmux(surf.C1));
-await claude("", SC2, true, {}, inCmux(surf.C2)); // no transcript yet
-s = await cmuxState(surf.C1);
-const upper = await cmuxState(surf.C1.toUpperCase());
+const PC1 = await claude(surf.C1, SC1, true);
+await claude(surf.C2, SC2, true); // no transcript yet
+s = await state(surf.C1);
+const upper = await state(surf.C1.toUpperCase());
 check("F60", "the surface shows its session, the id in upper or lower case", s.session === SC1 && upper.session === SC1, { s, upper });
 const c3 = await open(`t-${SC1}`);
 check("F60", "the server finds the transcript: its history arrives", Boolean(await until(() => JSON.stringify(c3.events).includes("answer C1"), 5_000)), c3.events.map((e) => e.kind));
 c3.ws.close();
-s = await cmuxState(surf.C2);
+s = await state(surf.C2);
 check("F62", "a session with no transcript: a message", s.session === null && /no transcript yet/.test(s.message!), s);
 writeFileSync(claudeFile(SC2), claudeLines(SC2, "C2"));
-check("F60", "two surfaces: each shows its own session", (await cmuxState(surf.C2)).session === SC2 && (await cmuxState(surf.C1)).session === SC1);
+check("F60", "two surfaces: each shows its own session", (await state(surf.C2)).session === SC2 && (await state(surf.C1)).session === SC1);
 claudeState(PC1, SC1b);
-check("F62", "after /clear: the new session", (await cmuxState(surf.C1)).session === SC1b);
+check("F62", "after /clear: the new session", (await state(surf.C1)).session === SC1b);
 claudeState(PC1, SC1);
 for (const status of ["busy", "idle", "shell", "waiting"]) {
   claudeState(PC1, SC1, { status, statusUpdatedAt: 1234 });
-  s = await cmuxState(surf.C1);
+  s = await state(surf.C1);
   check("F78", `Claude says ${status}: the state has it, with its time`, s.session === SC1 && (s as any).status === status && (s as any).since === 1234, s);
 }
 claudeState(PC1, SC1);
-const bg = await claude("", SC3, false, { kind: "bg" }, inCmux(surf.C1));
-check("F62", "a background session in the same surface does not count", (await cmuxState(surf.C1)).session === SC1);
+const bg = await claude(surf.C1, SC3, false, { kind: "bg" });
+check("F62", "a background session in the same surface does not count", (await state(surf.C1)).session === SC1);
 claudeState(bg, SC3);
-check("F62", "two agents: the one in the foreground", (await cmuxState(surf.C1)).session === SC1);
-const front2 = await claude("", SC4, true, {}, inCmux(surf.C1));
-s = await cmuxState(surf.C1);
+check("F62", "two agents: the one in the foreground", (await state(surf.C1)).session === SC1);
+const front2 = await claude(surf.C1, SC4, true);
+s = await state(surf.C1);
 check("F62", "two agents in the foreground of their terminals: a message, no guess", s.session === null && /More than one agent/.test(s.message!), s);
 for (const pid of [bg, front2]) process.kill(pid, "SIGKILL");
 await until(() => !alive(bg) && !alive(front2));
-const PO = await claude(surf.ORCA, SC3);
-check("F60", "an Orca pane with the same id is not a cmux surface", (await cmuxState(surf.ORCA)).session === null);
-process.kill(PO, "SIGKILL");
-const PT = await claude("", SC3, false, {}, { ...inCmux(surf.TWO), OTHER_TEXT: `x CMUX_SURFACE_ID=${surf.EMPTY}` });
-check("F61", "two values in one process: none of the two surfaces", (await cmuxState(surf.TWO)).session === null && (await cmuxState(surf.EMPTY)).session === null);
+const PT = await claude(surf.TWO, SC3, false, {}, { OTHER_TEXT: `x CMUX_SURFACE_ID=${surf.EMPTY}` });
+check("F61", "two values in one process: none of the two surfaces", (await state(surf.TWO)).session === null && (await state(surf.EMPTY)).session === null);
 process.kill(PT, "SIGKILL");
-const PCX = await agent("", "codex", true, openRollouts(SX2), inCmux(surf.X));
-s = (await until(async () => { const x = await cmuxState(surf.X); return x.session && x; }, SLOW)) ?? (await cmuxState(surf.X));
+const PCX = await agent(surf.X, "codex", true, openRollouts(SX2));
+s = (await until(async () => { const x = await state(surf.X); return x.session && x; }, SLOW)) ?? (await state(surf.X));
 check("F60", "Codex in a surface: its session", s.session === SX2, s);
 check("F82", "Codex with no turn in its rollout: no state", (s as any).status === undefined, s);
 { // ---- F82 the state of Codex ----
   const turn = (type: string, at = Date.now()) => JSON.stringify({ timestamp: new Date(at).toISOString(), ordinal: 1, type: "event_msg", payload: { type, turn_id: uuid() } }) + "\n";
-  const add = (text: string) => appendFileSync(rollout(SX2), text), codex = async () => { const x: any = await cmuxState(surf.X); return x.session === SX2 ? x.status : "other session"; };
+  const add = (text: string) => appendFileSync(rollout(SX2), text), codex = async () => { const x: any = await state(surf.X); return x.session === SX2 ? x.status : "other session"; };
   const record = (x: object) => { mkdirSync(join(HOME, ".cmuxterm"), { recursive: true }); writeFileSync(join(HOME, ".cmuxterm/codex-hook-sessions.json"), JSON.stringify({ sessions: { [SX2]: { pid: PCX, updatedAt: Date.now() / 1000 + 1, runtimeStatus: "needsInput", ...x } } })); };
   const seen: Record<string, unknown> = {};
   add(turn("task_started", Date.now() - 3600e3)); seen.oldProcess = await codex();
@@ -678,7 +550,7 @@ check("F82", "Codex with no turn in its rollout: no state", (s as any).status ==
   const CHATS = join(STATE, "chats.json"), PICK = join(STATE, "pick.json"), ws = () => uuid();
   const entry = (terminal: string, title: string, extra = {}) => ({ workspace: ws(), terminal, title, unread: false, ...extra });
   const list = (extra: object = {}) => writeFileSync(CHATS, JSON.stringify({ pid: process.pid, projects: [{ id: "g1", folder: "/tmp/p", chats: [entry(surf.C1, "one"), entry(surf.X, "<b>two</b>", { unread: true }), entry(surf.EMPTY, "three", { agent: "codex" })] }, { id: "g2", folder: "", chats: [entry(surf.C2, "other project")] }], ...extra }), { mode: 0o600 });
-  const chats = async (x: string) => { const y: any = await cmuxState(x); return { plus: y.plus, rows: y.chats.map((c: any) => [c.id, c.title, c.agent, c.status, c.unread]) }; };
+  const chats = async (x: string) => { const y: any = await state(x); return { plus: y.plus, rows: y.chats.map((c: any) => [c.id, c.title, c.agent, c.status, c.unread]) }; };
   check("F80", "no list: no chats", JSON.stringify(await chats(surf.C1)) === '{"rows":[]}');
   list();
   let got = await until(async () => { const y = await chats(surf.C1); return y.rows[1]?.[3] === "busy" && y; }, 4_000) as any;
@@ -711,42 +583,36 @@ check("F82", "Codex with no turn in its rollout: no state", (s as any).status ==
   check("F81", "no other request writes it", !/access-control/i.test(JSON.stringify(good.headers)) && (await get(`/${token}/follow/pick/${q1}`, own)).status !== 204);
 }
 process.kill(PCX, "SIGKILL");
-activate("TA", leaf.A, { fail: true });
-check("F63", "Orca is off: the cmux mode works, with no call to Orca in this whole part", (await cmuxState(surf.C1)).session === SC1 && calls().length === cmuxFrom, calls().slice(cmuxFrom));
-activate("TA", leaf.A);
-const bad = await Promise.all(["cmux=", "cmux=nope", `cmux=${surf.C1}x`, `cmux=${surf.C1}&worktree=${encodeURIComponent(WT)}`].flatMap((q) => [get(`/${token}/follow?${q}`), get(`/${token}/follow/state?${q}`)]));
+check("F63", "the server finds the surface with its CLI disabled", (await state(surf.C1)).session === SC1 && envLine === "/usr/bin/false");
+const bad = await Promise.all(["", "worktree=id:old", "cmux=", "cmux=nope", `cmux=${surf.C1}x`, `cmux=${surf.C1}&worktree=`, `cmux=${surf.C1}&worktree=id:old`].flatMap((q) => [get(`/${token}/follow?${q}`), get(`/${token}/follow/state?${q}`)]));
 check("F61", "no UUID, or cmux with a worktree: refused", bad.every((x) => x.status === 400), bad.map((x) => x.status));
 const closed = await Promise.all([get(`/follow/state${q1}`), get(`/follow${q1}`), get(`/${"0".repeat(64)}/follow/state${q1}`)]);
 const foreign = await Promise.all([{ host: "evil.example" }, { origin: "https://evil.example" }].flatMap((h) => [get(`/${token}/follow/state${q1}`, h), get(`/${token}/follow${q1}`, h)]));
 check("F64", "404 without the token, 403 for a foreign Host or Origin", closed.every((x) => x.status === 404) && foreign.every((x) => x.status === 403), [...closed, ...foreign].map((x) => x.status));
 const cmuxPage = await get(`/${token}/follow${q1}`);
 check("F64", "the cmux page is the same read-only page, with the same policy", cmuxPage.body === followPage.body && cmuxPage.headers["content-security-policy"] === followPage.headers["content-security-policy"]);
-check("F65", "the claim of the Orca pane did not change, the Orca mode gives the same answer", (await state()).session === SA && JSON.stringify(store("claude").activeSessionsBySurface[leaf.A]) === orcaClaim);
-await claude("", SC3, false, {}, { CMUX_SURFACE_ID: leaf.SHELL });
-activate("TS", leaf.SHELL);
-check("F65", "a cmux surface is not an Orca pane with the same id", (await state()).session === null);
+check("F65", "another surface keeps its claim", JSON.stringify(store("claude").activeSessionsBySurface[surface.A]) === firstClaim && (await state()).session === SA);
 {
-  for (let i = 0; i < 5; i++) await cmuxState(surf.EMPTY);
+  for (let i = 0; i < 5; i++) await state(surf.EMPTY);
   const lines = readFileSync(join(STATE, "server.log"), "utf8").split("\n").filter((l) => /^\[orca-chat\] 20/.test(l)), of = (x: string) => lines.filter((l) => l.includes(`terminal ${x.slice(0, 8)}:`));
   check("F77", "the log has one line per change, with the reason, and no token", of(surf.EMPTY).length === 1 && /No Claude Code.*claude here: none/.test(of(surf.EMPTY)[0]) && of(surf.C1).some((l) => l.includes(`session ${SC1.slice(0, 8)}`)) && !lines.join().includes(token), { empty: of(surf.EMPTY), c1: of(surf.C1) });
 }
-activate("TA", leaf.A);
 
 // ---- F35 new code, F36 stop ----
 writeFileSync(join(STATE, "launch.json"), JSON.stringify({ ...launch(), code: undefined }));
-const { ORCA_CHAT_PORT: _, ...noPort } = { ...base, ...paneOf(leaf.A) };
-r = await chat(noPort, "--no-open");
+const { ORCA_CHAT_PORT: _, ...noPort } = small;
+r = await chat(noPort);
 check("F35", "other code: a new server, same port, same token", r.code === 0 && r.out === a.out && launch().pid !== serverPid && !alive(serverPid) && listen().length === 1, { code: r.code, err: r.err, same: r.out === a.out, pids: [serverPid, launch().pid] });
 serverPid = launch().pid;
 check("F35", "the new server follows at once", (await state()).session === SA);
 const launchText = readFileSync(join(STATE, "launch.json"), "utf8");
 writeFileSync(join(STATE, "launch.json"), JSON.stringify({ pid: PA, pidStart: lstart(PA), launchId: "x", code: "old" }));
-r = await chat({ ...base }, "--stop");
-const r2 = await chat({ ...base, ...paneOf(leaf.A) }, "--no-open");
-check("F36", "--stop and the restart leave a pid that is not the server alone", alive(PA) && /no server/.test(r.out) && r2.code !== 0 && /in use/.test(r2.err) && alive(serverPid), { r, r2 });
+r = await chat(small, "stop");
+const r2 = await chat(small);
+check("F36", "stop and the restart leave a pid that is not the server alone", alive(PA) && /no server/.test(r.out) && r2.code !== 0 && /in use/.test(r2.err) && alive(serverPid), { r, r2 });
 writeFileSync(join(STATE, "launch.json"), launchText);
-r = await chat({ ...base }, "--stop");
-check("F36", "--stop stops the server", r.code === 0 && !alive(serverPid), r);
+r = await chat(small, "stop");
+check("F36", "stop stops the server", r.code === 0 && !alive(serverPid), r);
 
 // ---- F66 to F71 cmux-chat-open, with a fake cmux CLI. No server runs now. ----
 const CBIN = join(OUT, "cmux-bin"), CDB = join(OUT, "cmux-mode.json"), CCALLS = join(OUT, "cmux-calls.jsonl");
@@ -764,7 +630,7 @@ else console.log(JSON.stringify({surface_id:JSON.parse(stdin).surface_id}));`);
 writeFileSync(join(CBIN, "claude"), `#!/bin/bash\necho "$CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN|$PWD|$*" >"${join(OUT, "claude-started.txt")}"\n`);
 for (const f of ["cmux", "claude"]) chmodSync(join(CBIN, f), 0o755);
 const WS = uuid().toUpperCase(), BROWSER = uuid().toUpperCase();
-const CENV = { ...small, PATH: `${CBIN}:${small.PATH}`, ORCA_CHAT_ORCA: "/nonexistent/orca", CMUX_WORKSPACE_ID: WS, CMUX_SURFACE_ID: surf.C1.toUpperCase(), CMUX_BUNDLED_CLI_PATH: join(CBIN, "cmux"), CMUX_SOCKET_PATH: "/nonexistent/cmux.sock" };
+const CENV = { ...small, PATH: `${CBIN}:${small.PATH}`, CMUX_WORKSPACE_ID: WS, CMUX_SURFACE_ID: surf.C1.toUpperCase(), CMUX_BUNDLED_CLI_PATH: join(CBIN, "cmux"), CMUX_SOCKET_PATH: "/nonexistent/cmux.sock" };
 const cmuxCalls = (): { argv: string[]; stdin: string }[] => (existsSync(CCALLS) ? readFileSync(CCALLS, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((c) => c.argv[0] !== "events") : []); // the helper asks for the events
 const row = (type: string, id = uuid(), extra = {}) => ({ id, type, title: type, ...extra });
 const GOOD = { workspace: WS, surfaces: [row("browser", BROWSER), row("terminal", surf.C1.toUpperCase()), row("browser", uuid(), { dock_scope: "global" })] };
@@ -820,7 +686,7 @@ check("F76", "cmux.json: the start page of each command is dark", cfg.commands.e
 check("F71", "each Claude command is in the classic mode", cfg.commands.filter((c: any) => c.name.startsWith("Claude")).every((c: any) => c.workspace.layout.children[1].pane.surfaces[0].command.includes("; CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude")));
 const cxCommands = cfg.commands.filter((c: any) => c.name.startsWith("Codex + chat")).map((c: any) => c.workspace.layout.children[1].pane.surfaces[0].command as string);
 check("F75", "cmux.json: each Codex command has --no-daemon and --no-alt-screen, and opens the chat", cxCommands.length === 3 && cxCommands.every((c: string) => /cmux-chat-open --new; codex (resume )?--no-daemon --no-alt-screen\b/.test(c)), cxCommands);
-writeFileSync(join(STUB, "codex"), `#!/bin/sh\necho "$*|$PWD" > ${JSON.stringify(join(OUT, "codex-started.txt"))}\n`, { mode: 0o755 });
+writeFileSync(join(CBIN, "codex"), `#!/bin/sh\necho "$*|$PWD" > ${JSON.stringify(join(OUT, "codex-started.txt"))}\n`, { mode: 0o755 });
 const cxShell = await exec(CENV, "/bin/zsh", "-fc", cxCommands[0]);
 check("F75", "Codex starts also when cmux-chat-open fails", cxShell.code === 0 && said.test(cxShell.err) && readFileSync(join(OUT, "codex-started.txt"), "utf8") === `--no-daemon --no-alt-screen|${OUT}\n`, cxShell);
 // It works: a new server, one list call, one navigation. Each 20 ms: is the token in an argv?
@@ -848,19 +714,12 @@ const wrong = await Promise.all([get(path.replace(surf.C1.toUpperCase(), surf.C2
 check("F69", "another surface, a forged signature, an old link, a changed time, no UUID, no parameters: 404, no token", wrong.every((r) => r.status === 404 && !r.headers.location), wrong.map((r) => r.status));
 const go = await get(path), again = await get(path);
 check("F69", "the link leads to the chat of this surface, one time", go.status === 302 && go.headers.location === `/${token}/follow?cmux=${surf.C1.toUpperCase()}` && again.status === 404, [go.status, again.status]);
-check("F60", "the page behind the link shows the session of this terminal", (await get(go.headers.location)).status === 200 && (await cmuxState(surf.C1)).session === SC1);
+check("F60", "the page behind the link shows the session of this terminal", (await get(go.headers.location)).status === 200 && (await state(surf.C1)).session === SC1);
 const cmuxServer = launch().pid;
 const serverEnv = spawnSync("/bin/ps", ["-Eww", "-o", "command=", "-p", String(cmuxServer)], { encoding: "utf8" }).stdout;
-check("F70", "the server has no surface, workspace, or socket of cmux in its environment, and no Orca CLI", !/CMUX_(SURFACE_ID|WORKSPACE_ID|SOCKET_PATH)=/.test(serverEnv) && /CMUX_BUNDLED_CLI_PATH=\/usr\/bin\/false/.test(serverEnv) && launch().orca === "");
-s = await state();
-check("F70", "the Orca mode on that server: a message", s.session === null && /Orca CLI/.test(s.message!), s);
+check("F70", "the server has no surface, workspace, or socket of cmux in its environment", !/CMUX_(SURFACE_ID|WORKSPACE_ID|SOCKET_PATH)=/.test(serverEnv) && /CMUX_BUNDLED_CLI_PATH=\/usr\/bin\/false/.test(serverEnv));
 x = await chatOpen(GOOD);
 check("F70", "a second cmux-chat-open keeps the server", x.code === 0 && launch().pid === cmuxServer && x.calls.length === 3, x);
-r = await chat({ ...base, ...paneOf(leaf.A) }, "--no-open");
-check("F70", "orca-chat in Orca then gives the server the Orca CLI: same port, same token, both modes work", r.out === a.out && launch().pid !== cmuxServer && (await state()).session === SA && (await cmuxState(surf.C1)).session === SC1, { code: r.code, err: r.err, same: r.out === a.out });
-const both = launch().pid;
-x = await chatOpen(GOOD);
-check("F70", "cmux-chat-open keeps a server that Orca started", x.code === 0 && launch().pid === both, x);
 check("F68", "the token is not in the server log", !readFileSync(logFile, "utf8").includes(token) && readFileSync(logFile, "utf8").length > 0);
 const down: any = { textContent: "" };
 new Function("document", "location", "fetch", "setTimeout", "clearTimeout", script)({ visibilityState: "visible", getElementById: (id: string) => (id === "note" ? down : { textContent: "" }), addEventListener() {} }, { search: q1 }, async () => { throw new Error("down"); }, () => 0, () => {});
@@ -890,22 +749,15 @@ for (const [name, dir, mode] of [["a folder with no project", "/private/tmp", {}
 }
 const hung = await inDir(P("a/b"), { groupHang: true });
 check("F72", "the group list hangs: the chat opens, it ends after 3 s, exit 0", hung.code === 0 && hung.err === "" && hung.ms < 6_000 && hung.argv.includes("browser.navigate") && hung.added.length === 0, hung);
-r = await chat({ ...base }, "--stop");
-check("F36", "--stop stops this server too", r.code === 0 && !alive(both), r);
-
-// ---- placement ----
-const place = spawnSync(process.execPath, [join(import.meta.dir, "place.e2e.ts"), OUT], { encoding: "utf8" });
-for (const line of place.stdout.split("\n")) { const m = line.match(/^(PASS|FAIL) (P\d+.*)/); if (m) check("place", m[2].trim(), m[1] === "PASS"); }
-check("place", "the placement test ended well", place.status === 0, place.stderr);
+r = await chat(small, "stop");
+check("F36", "stop stops this server too", r.code === 0 && !alive(cmuxServer), r);
 
 // ---- F40 ----
 check("F40", "the real state dirs did not change", snapshot() === realBefore, realPaths);
-check("F40", "in the whole run the CLI got only terminal list and terminal switch", calls().filter((c) => c.argv).every((c) => c.argv[0] === "terminal" && ["list", "switch"].includes(c.argv[1])), [...new Set(calls().filter((c) => c.argv).map((c) => c.argv.slice(0, 2).join(" ")))]);
 
 writeFileSync(join(OUT, "server.log"), log);
 writeFileSync(join(OUT, "cmux-calls.json"), JSON.stringify(cmuxCalls(), null, 1));
-writeFileSync(CALLS, readFileSync(CALLS, "utf8").replaceAll(token, "<token>"));
 const failed = results.filter((x) => !x.ok);
-writeFileSync(join(OUT, "result.json"), JSON.stringify({ when: new Date().toISOString(), passed: results.length - failed.length, failed: failed.length, switchMs: times, results }, null, 1).replaceAll(token, "<token>"));
+writeFileSync(join(OUT, "result.json"), JSON.stringify({ when: new Date().toISOString(), passed: results.length - failed.length, failed: failed.length, results }, null, 1).replaceAll(token, "<token>"));
 console.log(`\n${results.length - failed.length} passed, ${failed.length} failed\n${join(OUT, "result.json")}`);
 process.exit(failed.length ? 1 : 0);

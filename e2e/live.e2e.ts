@@ -48,7 +48,7 @@ async function start(src = SRC) {
   const env = {
     HOME, USER: "e2e", TMPDIR: tmpdir(), PATH: `${join(DATA, "bun-1.3.14/package/bin")}:/usr/bin:/bin`, CMUX_AGENT_CHAT_PORT: String(port), CMUX_AGENT_CHAT_TOKEN: TOKEN,
     CMUX_AGENT_CHAT_STATE_FILE: join(STATE, "server.json"), CMUX_AGENT_CHAT_LAUNCH_ID: "e2e", CMUX_AGENT_HOOK_STATE_DIR: STATE, CMUX_BUNDLED_CLI_PATH: "/usr/bin/false",
-    CMUX_AGENT_MODELS_URL: "http://127.0.0.1:9/off", ORCA_CHAT_STATE_DIR: STATE, CLAUDE_CONFIG_DIR: CLAUDE, CODEX_HOME: CODEX, ORCA_CHAT_ORCA: "",
+    CMUX_AGENT_MODELS_URL: "http://127.0.0.1:9/off", ORCA_CHAT_STATE_DIR: STATE, CLAUDE_CONFIG_DIR: CLAUDE, CODEX_HOME: CODEX,
   };
   child = spawn(BUN, ["--preload", join(ROOT, "lib/guard.ts"), "server.ts"], { cwd: src, env, stdio: ["ignore", log, log] });
   for (let i = 0; i < 200; i++) {

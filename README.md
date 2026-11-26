@@ -27,9 +27,9 @@ Run `git pull && ./install` from the clone. Merge any updated cmux settings and 
 
 ## Uninstall
 
-Stop the chat server with `./bin/orca-chat --stop` and quit cmux. Remove the zsh start line if you added it. Restore your cmux config from backup or remove the entries you added. Restore the sidebar from its pre-patch backup or reinstall cmux-sidebar.
+Stop the chat server with `"${ORCA_CHAT_DATA_DIR:-$HOME/.local/share/orca-chat}/bun-1.3.14/package/bin/bun" lib/chat.ts stop` and quit cmux. Remove the zsh start line if you added it. Restore your cmux config from backup or remove the entries you added. Restore the sidebar from its pre-patch backup or reinstall cmux-sidebar.
 
-Remove the clone and `~/.config/cmux-chat/`. If you no longer use the shared Orca installation, remove `~/.local/share/orca-chat/` (or your `ORCA_CHAT_DATA_DIR`) and `~/.local/state/orca-chat/`. The state folder contains the saved chat mappings.
+Remove the clone and `~/.config/cmux-chat/`. To remove the installed server and saved mappings, remove `~/.local/share/orca-chat/` (or your `ORCA_CHAT_DATA_DIR`) and `~/.local/state/orca-chat/`. The state folder contains the saved chat mappings.
 
 ## Tests and license
 

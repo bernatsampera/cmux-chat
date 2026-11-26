@@ -1,9 +1,9 @@
-// orca-chat phases. bin/orca-chat runs `open` and `stop` under one lock, lib/cmux.ts runs `cmux` under it.
+// Start or stop the cmux chat server.
 import { spawn } from "node:child_process";
 import { randomBytes, randomUUID } from "node:crypto";
 import { closeSync, existsSync, openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { DATA_DIR, Refusal, STATE_DIR, ensureStateDir, matchLeaf, orcaBin, paneLeaf, pidStart, processLeaf, ps, refuse, run, writePrivate } from "./common";
+import { DATA_DIR, Refusal, STATE_DIR, ensureStateDir, pidStart, ps, refuse, run, writePrivate } from "./common";
 
 const HERE = import.meta.dir;
 const GUARD = join(HERE, "guard.ts");
@@ -15,16 +15,6 @@ const LAUNCH_FILE = join(STATE_DIR, "launch.json"); // written by us
 const LOG_FILE = join(STATE_DIR, "server.log");
 const PORT = Number(process.env.ORCA_CHAT_PORT || json(SERVER_FILE)?.port || 47739);
 const CODE = new Bun.CryptoHasher("sha256").update(["chat", "common", "follow", "guard", "live", "queue"].map((f) => readFileSync(join(HERE, `${f}.ts`), "utf8")).join("\0")).digest("hex");
-
-// The pane of this command. Codex can give its commands a small environment, so
-// the processes above it are asked too.
-function callerLeaf(): string {
-  let leaf = paneLeaf(`ORCA_PANE_KEY=${process.env.ORCA_PANE_KEY ?? ""}`);
-  for (let pid = process.ppid, i = 0; !leaf && pid > 1 && i < 40; i++, pid = Number(ps(pid, "ppid"))) leaf = processLeaf(pid);
-  return leaf ?? refuse("no Orca pane was found, run this in an Orca terminal");
-}
-
-// ---- server ----
 
 function json(path: string): any {
   try {
@@ -62,15 +52,13 @@ function readToken(): string {
   return token;
 }
 
-async function ensureServer(orca: string): Promise<string> {
+async function ensureServer(): Promise<string> {
   const token = readToken();
   const url = (port: number) => `http://127.0.0.1:${port}/${token}`;
-  // An update of this code, or a server that cmux started and that knows no Orca
-  // CLI: a new server on the same port, with the same token.
-  if (serverPid() && (json(LAUNCH_FILE).code !== CODE || (orca && json(LAUNCH_FILE).orca === ""))) await stopServer();
+  if (serverPid() && json(LAUNCH_FILE).code !== CODE) await stopServer();
   const running = await healthy(token);
   if (running) return url(running);
-  if (serverPid()) refuse("the server runs but does not answer, run orca-chat --stop");
+  if (serverPid()) refuse("the server runs but does not answer, run bun lib/chat.ts stop");
   if (!existsSync(join(SERVER_DIR, "node_modules/react")) || !existsSync(SERVER_BUN)) refuse("the sidecar is not installed, run bin/install");
   if (await portInUse()) refuse(`port ${PORT} is in use by another program, set ORCA_CHAT_PORT`);
   const launchId = randomUUID();
@@ -85,9 +73,8 @@ async function ensureServer(orca: string): Promise<string> {
     CMUX_AGENT_MODELS_URL: "http://127.0.0.1:9/off",
     DO_NOT_TRACK: "1",
     ORCA_CHAT_STATE_DIR: STATE_DIR,
-    ORCA_CHAT_ORCA: orca,
   };
-  for (const key of ["HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "TZ", "SHELL", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "ORCA_USER_DATA_PATH"]) {
+  for (const key of ["HOME", "USER", "LOGNAME", "TMPDIR", "LANG", "TZ", "SHELL", "CLAUDE_CONFIG_DIR", "CODEX_HOME"]) {
     if (process.env[key]) env[key] = process.env[key]!;
   }
   const log = openSync(LOG_FILE, "w", 0o600);
@@ -96,7 +83,7 @@ async function ensureServer(orca: string): Promise<string> {
   child.on("error", () => {});
   child.unref();
   if (!child.pid) refuse("the server did not start");
-  writePrivate(LAUNCH_FILE, JSON.stringify({ pid: child.pid, pidStart: pidStart(child.pid), launchId, code: CODE, orca }) + "\n");
+  writePrivate(LAUNCH_FILE, JSON.stringify({ pid: child.pid, pidStart: pidStart(child.pid), launchId, code: CODE }) + "\n");
   for (let i = 0; i < 60; i++) {
     const port = await healthy(token);
     if (port) return url(port);
@@ -133,16 +120,6 @@ run(async () => {
     const pid = await stopServer();
     return console.log(pid ? `stopped server ${pid}` : "no server of orca-chat runs");
   }
-  if (phase === "cmux") {
-    let orca = "";
-    try { orca = orcaBin(); } catch {}
-    return console.log(await ensureServer(orca));
-  }
-  if (phase !== "open") refuse("use bin/orca-chat");
-  const leaf = callerLeaf();
-  const { worktreeId } = await matchLeaf(leaf);
-  if (!worktreeId) refuse("the terminal has no worktree");
-  const worktree = `id:${worktreeId}`;
-  const base = await ensureServer(orcaBin());
-  console.log(JSON.stringify({ url: `${base}/follow?worktree=${encodeURIComponent(worktree)}`, worktree, leaf, orca: orcaBin() }));
+  if (phase === "cmux") return console.log(await ensureServer());
+  refuse("use the cmux or stop phase");
 });

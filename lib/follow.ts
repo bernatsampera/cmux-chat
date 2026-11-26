@@ -1,21 +1,18 @@
-// The follow page of one worktree: it shows the session of the active terminal
-// tab. Of one cmux surface: the session of that surface. Read-only: it reads Orca's tab list, the live agent processes, and the
-// transcripts, and it writes only the session stores that the server reads, and
-// the chat that the user picked in the strip.
+// Show the live session and project tabs for one cmux surface.
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { AGENTS, CHATS_FILE, CLAUDE_DIR, CODEX_DIR, PICK_FILE, RENAME_FILE, validTitle, Refusal, SESSION_ID, claudeLive, pidStart, processLeaf, processSurface, ps, readStore, runtimeClient, sh, writePrivate, writeStore, type Agent, type Project } from "./common";
+import { AGENTS, CHATS_FILE, CLAUDE_DIR, CODEX_DIR, PICK_FILE, RENAME_FILE, validTitle, Refusal, SESSION_ID, claudeLive, pidStart, processSurface, ps, readStore, sh, writePrivate, writeStore, type Agent, type Project } from "./common";
 
 interface Claim { leaf: string; agent: Agent; sessionId: string; pid: number; start: string; cwd: string; path?: string; status?: string; since?: number }
 
 // An environment never changes, so it is read once per process. A look that found
 // nothing can be a failed one (a busy machine), so it is done again after 10 s.
 const leaves = new Map<string, { leaf?: string; at: number }>();
-function leafOf(pid: number, start: string, read: typeof processLeaf) {
-  const key = `${read.name} ${pid} ${start}`;
+function leafOf(pid: number, start: string) {
+  const key = `${pid} ${start}`;
   let known = leaves.get(key);
-  if (!known || (!known.leaf && Date.now() - known.at > 10_000)) leaves.set(key, (known = { leaf: read(pid), at: Date.now() }));
+  if (!known || (!known.leaf && Date.now() - known.at > 10_000)) leaves.set(key, (known = { leaf: processSurface(pid), at: Date.now() }));
   return known.leaf ?? "";
 }
 
@@ -76,14 +73,14 @@ function asked(sessionId: string, pid: number, since: number): boolean {
 }
 
 // The live interactive agents in these panes. The session id is read each time.
-export function claims(wanted: Set<string>, read = processLeaf): Claim[] {
+function claims(wanted: Set<string>): Claim[] {
   const out: Claim[] = [];
   const dir = join(CLAUDE_DIR, "sessions");
   for (const name of existsSync(dir) ? readdirSync(dir) : []) {
     const pid = Number(/^(\d+)\.json$/.exec(name)?.[1]);
     const live: any = pid && claudeLive(pid);
     if (live?.kind !== "interactive" || typeof live.sessionId !== "string" || !SESSION_ID.test(live.sessionId) || typeof live.procStart !== "string") continue;
-    const leaf = leafOf(pid, live.procStart, read);
+    const leaf = leafOf(pid, live.procStart);
     // procStart also shows a dead process, or a reused pid.
     const start = wanted.has(leaf) ? pidStart(pid) : "";
     if (!start || start.replace(/\s+/g, " ") !== live.procStart.replace(/\s+/g, " ")) continue;
@@ -95,7 +92,7 @@ export function claims(wanted: Set<string>, read = processLeaf): Claim[] {
   }
   for (const pid of codexPids) {
     const start = pidStart(pid);
-    const leaf = start && leafOf(pid, start, read);
+    const leaf = start && leafOf(pid, start);
     if (!leaf || !wanted.has(leaf) || ps(pid, "tty") === "??") continue;
     const open = sh("/usr/sbin/lsof", "-nP", "-p", String(pid), "-Ffn");
     const files = [...new Set([...open.matchAll(/^n(.*)$/gm)].map((m) => m[1]).filter((f) => f.startsWith(join(CODEX_DIR, "sessions") + "/") && ROLLOUT.test(f)))];
@@ -136,43 +133,14 @@ function bind(c: Claim, tabId: string, transcriptPath: string) {
   }
 }
 
-const lastGroup = new Map<string, string>();
-
 // status is the word of Claude Code for what it does (busy, idle, shell, waiting), and for Codex
 // busy, idle, or asked. No status: not known.
 interface State { session: string | null; title: string; message: string | null; status?: string; since?: number; chats?: object[]; plus?: boolean }
 const none = (message: string | null, title = ""): State => ({ session: null, title, message });
 
-// session and message null: keep the chat that is shown.
-export async function followState(worktree: string, token: string): Promise<State> {
-  const client = runtimeClient();
-  if (!client) return none("This Orca version has no tab list.");
-  const s = (await client.call("session.tabs.list", { worktree }, { timeoutMs: 3_000 })).result;
-  const chats = new Set(s.tabs.filter((t: any) => t.type === "browser" && String(t.url).includes(`/${token}/follow?`)).map((t: any) => t.id));
-  const rest = s.tabGroups.filter((g: any) => !g.tabOrder.some((id: string) => chats.has(id)));
-  const groups = rest.length ? rest : s.tabGroups;
-  const isTerm = (id: string) => s.tabs.some((t: any) => t.type === "terminal" && t.parentTabId === id);
-  const group = groups.find((g: any) => g.id === s.activeGroupId) ?? groups.find((g: any) => g.id === lastGroup.get(worktree)) ?? groups.find((g: any) => isTerm(g.activeTabId)) ?? groups[0];
-  if (!group) return none("This worktree has no open terminal.");
-  lastGroup.set(worktree, group.id);
-  // Without a split, the chat is the active tab: follow the tab before it.
-  const id = chats.has(group.activeTabId) ? group.recentTabIds?.findLast((x: string) => !chats.has(x)) : group.activeTabId;
-  const panes = s.tabs.filter((t: any) => t.type === "terminal" && t.parentTabId === id);
-  if (!panes.length) return none(null);
-  let found = claims(new Set(panes.map((t: any) => t.leafId.toLowerCase())));
-  let pane = panes.find((t: any) => t.id === s.activeTabId);
-  if (!pane) {
-    const busy = panes.filter((t: any) => found.some((c) => c.leaf === t.leafId.toLowerCase()));
-    pane = busy.length > 1 ? busy.find((t: any) => t.leafId === t.parentLayout?.activeLeafId) : (busy[0] ?? panes[0]);
-    if (!pane) return none("More than one pane of this tab has an agent. Click one of them.");
-  }
-  const title = String(pane.title ?? "");
-  return settle(found.filter((c) => c.leaf === pane.leafId.toLowerCase()), id, title);
-}
-
 const lastLog = new Map<string, string>();
 export async function followSurface(surface: string): Promise<State> {
-  const state = settle(claims(new Set([surface]), processSurface), surface, ""), line = state.session ?? state.message ?? "";
+  const state = settle(claims(new Set([surface])), surface, ""), line = state.session ?? state.message ?? "";
   if (lastLog.get(surface) !== line) {
     lastLog.set(surface, line);
     console.log(`[orca-chat] ${new Date().toISOString()} terminal ${surface.slice(0, 8)}: ${state.session ? "session " + line.slice(0, 8) : line + why(surface)}`);
@@ -195,7 +163,7 @@ function strip(surface: string) {
   const p = project(surface);
   if (!p) return { chats: [] };
   let now = agents.get(p.id);
-  if (!now || Date.now() - now.at > 1_500) agents.set(p.id, (now = { at: Date.now(), found: claims(new Set(p.chats.map((c) => c.terminal)), processSurface) }));
+  if (!now || Date.now() - now.at > 1_500) agents.set(p.id, (now = { at: Date.now(), found: claims(new Set(p.chats.map((c) => c.terminal))) }));
   const chats = p.chats.map((c) => {
     const live = now!.found.find((x) => x.leaf === c.terminal);
     return { id: c.terminal, workspace: c.workspace, title: c.title, agent: live?.agent ?? c.agent, status: live?.status, since: live?.since, unread: c.unread };
@@ -267,7 +235,6 @@ iframe{position:fixed;inset:var(--bar) 0 var(--foot);width:100%;height:calc(100%
 #state{position:fixed;inset:auto 0 0;height:var(--foot);line-height:28px;padding:0 16px;background:#212121;font-size:13px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 #state.busy{color:#ffb86c}#state.done{color:#50fa7b}#state.ask{color:#ff79c6}#state.busy::before{content:"\\25CF  ";animation:beat 1.2s infinite}@keyframes beat{50%{opacity:.15}}
 </style></head><body><div id="bar"><div id="tabs"></div><div id="plus" title="New Claude chat">+</div></div><div id="note"></div><div id="state"></div><button id="rename" hidden>Rename</button><script>
-const command = location.search.startsWith("?cmux=") ? "cmux-chat-open" : "orca-chat";
 const frames = new Map(), loaded = new Set(), note = document.getElementById("note");
 let busy = false, timer, shown = null, wanted = null, misses = 0;
 function draw(id) { for (const [key, f] of frames) f.className = key === id ? "on" : ""; }
@@ -413,8 +380,8 @@ async function poll() {
     let s;
     try {
       const res = await fetch("follow/state" + location.search, { cache: "no-store", signal: AbortSignal.timeout(5000) });
-      s = res.ok ? await res.json() : { message: "The chat server refused the request. Run " + command + " in a terminal." };
-    } catch { s = { message: "The chat server does not answer. Run " + command + " in a terminal." }; }
+      s = res.ok ? await res.json() : { message: "The chat server refused the request. Run cmux-chat-open in a terminal." };
+    } catch { s = { message: "The chat server does not answer. Run cmux-chat-open in a terminal." }; }
     // One bad read is not the end of a session: the chat stays for 5 polls.
     misses = s.session || !wanted ? 0 : misses + 1;
     if (s.session || (s.message && (!wanted || misses > 4)) || !shown) show(s.session, s.session ? "" : s.message || "Open a terminal tab.");

@@ -5,7 +5,7 @@
 // server read-only: nothing can send text or an interrupt to a terminal.
 import { basename } from "node:path";
 import { UUID, signLink } from "./common";
-import { PAGE, followState, followSurface, pickChat, renameChat } from "./follow";
+import { PAGE, followSurface, pickChat, renameChat } from "./follow";
 import { liveJoin, liveServer } from "./live";
 import "./queue";
 
@@ -50,10 +50,10 @@ function trusted(req: Request): boolean {
 }
 
 async function follow(url: URL): Promise<Response> {
-  const worktree = url.searchParams.get("worktree") ?? "", surface = url.searchParams.get("cmux")?.toLowerCase();
-  if (surface === undefined ? !/^id:.{1,500}$/.test(worktree) : worktree || !UUID.test(surface)) return new Response("worktree is missing", { status: 400 });
+  const surface = url.searchParams.get("cmux")?.toLowerCase();
+  if (!surface || !UUID.test(surface) || url.searchParams.has("worktree")) return new Response("a cmux surface id is required", { status: 400 });
   if (url.pathname === `/${TOKEN}/follow`) return new Response(PAGE, { headers: { "content-type": "text/html; charset=utf-8" } });
-  const state = await (surface ? followSurface(surface) : followState(worktree, TOKEN)).catch((err) => ({ session: null, title: "", message: `The session is not known: ${err?.message ?? err}` }));
+  const state = await followSurface(surface).catch((err) => ({ session: null, title: "", message: `The session is not known: ${err?.message ?? err}` }));
   return Response.json(state, { headers: { "cache-control": "no-store" } });
 }
 

@@ -63,7 +63,7 @@ async function until<T>(fn: () => T | Promise<T>, ms = 4_000): Promise<T | undef
 }
 const port = await new Promise<number>((r) => { const s = createServer().listen(0, "127.0.0.1", () => { const p = (s.address() as any).port; s.close(() => r(p)); }); });
 // lib/tabs.ts reads the port, so only pages of this test are chats: the workspaces of the user are not.
-Object.assign(process.env, { ORCA_CHAT_STATE_DIR: STATE, ORCA_CHAT_PORT: String(port), CLAUDE_CONFIG_DIR: join(OUT, "claude"), CODEX_HOME: join(OUT, "codex"), ORCA_CHAT_ORCA: "/nonexistent/orca" });
+Object.assign(process.env, { ORCA_CHAT_STATE_DIR: STATE, ORCA_CHAT_PORT: String(port), CLAUDE_CONFIG_DIR: join(OUT, "claude"), CODEX_HOME: join(OUT, "codex") });
 const { readTabs, selectTab } = await import("../lib/tabs");
 type Tab = Awaited<ReturnType<typeof readTabs>>[number];
 const low = (x: unknown) => String(x ?? "").toLowerCase();
@@ -90,7 +90,7 @@ exec '${CMUX}' "$@"
 `);
 writeFileSync(AGENT, `#!/usr/bin/env bash
 # agent.sh <name> <title> <wait> <mode>...: runs cmux-chat-open with each mode, then waits like an agent.
-export ${["ORCA_CHAT_STATE_DIR", "ORCA_CHAT_PORT", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "ORCA_CHAT_ORCA"].map((k) => `${k}='${process.env[k]}'`).join(" ")} CMUX_BUNDLED_CLI_PATH='${WRAP}'
+export ${["ORCA_CHAT_STATE_DIR", "ORCA_CHAT_PORT", "CLAUDE_CONFIG_DIR", "CODEX_HOME"].map((k) => `${k}='${process.env[k]}'`).join(" ")} CMUX_BUNDLED_CLI_PATH='${WRAP}'
 name="$1" title="$2"; sleep "$3"; shift 3
 for mode in "$@"; do '${ROOT}/bin/cmux-chat-open' $mode 2>>"${OUT}/$name.err"; echo "$mode exit $?" >>"${OUT}/$name.log"; done
 printf '\\033]0;%s\\007' "$title"

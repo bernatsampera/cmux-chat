@@ -10,13 +10,12 @@
 //   A05 A chat that was only opened, resumed, or quit looks new (its agent record has a new time).
 //   A06 After a restart of cmux (no latestAt) the age is lost or is the start time.
 //   A07 The end of a long turn does not count. The end of a stale (interrupted) turn counts.
-//   A08 The saved text removes the text that the user or move-chats wrote, or grows at each save.
+//   A08 The saved text removes the text that the user wrote, or grows at each save.
 //   A09 It writes on each tick, writes again when cmux refuses, or writes an older time.
 //   A10 A chat with no data shows a wrong age.
 //   A11 An unread count and the age are drawn on top of each other, or a long title runs under the age.
 //   A12 A new conversation does not become bright at once.
 //   A13 A bad date in the description breaks the sidebar.
-//   A14 move-chats makes a second workspace because the description has the new text (move.e2e.ts).
 //   A15 An update of cmux-sidebar replaces the file, and the patch does not apply or applies two times (by hand: cmux/setup).
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -73,13 +72,13 @@ for (const [ago, want] of [[20, "now"], [5 * 60, "5m"], [59 * 60, "59m"], [3 * H
   ok("A03", "today normal", c({ latestAt: T - 5 * H }) === "secondary"); ok("A03", "older dim", c({ latestAt: T - 2 * D }) === "tertiary");
   ok("A03", "open chat is bright", c({ latestAt: T - 2 * D, selected: true }) === "primary"); ok("A03", "title color stays", c({ latestAt: T - 2 * D, color: "#0A84FF" }) === "#0A84FF"); }
 { const r = mount(one({ latestAt: T - 2 * D, agents: [ag("working", T)] }), T).row("job"); ok("A04", "working: no age, bright", r.age === null && r.color === "primary", r); }
-{ const d = `Moved from Orca: x | last active ${iso(T - 2 * D)}`;
+{ const d = `Project notes | last active ${iso(T - 2 * D)}`;
   ok("A05", "only opened", mount(one({ description: d, agents: [ag("idle", T)] }), T).row("job").age === "2d");
   ok("A05", "resumed after a real message", mount(one({ latestAt: T - 5 * H, agents: [ag("ended", T)] }), T).row("job").age === "5h");
   ok("A06", "restart keeps the saved time", mount(one({ description: d }), T).row("job").age === "2d");
   const s = mount(one({ description: d }), T); ok("A09", "no write when nothing is new", s.writes().length === 0, s.writes());
   s.set(one({ description: d, latestAt: T + 10 }), T + 10); ok("A12", "a new message is bright at once", s.row("job").color === "primary" && s.row("job").age === "now", s.row("job"));
-  const w = s.writes(); ok("A08", "one save, text stays", w.length === 1 && w[0].description === `Moved from Orca: x | last active ${iso(T + 10)}` && w[0].workspace_id === "w1", w);
+  const w = s.writes(); ok("A08", "one save, text stays", w.length === 1 && w[0].description === `Project notes | last active ${iso(T + 10)}` && w[0].workspace_id === "w1", w);
   for (let i = 0; i < 20; i++) s.set(one({ description: d, latestAt: T + 10 }), T + 10 + i);
   ok("A09", "cmux refuses: no second write", s.writes().length === 1, s.writes());
   const s2 = mount(one({ description: w[0]?.description }), T + 3 * H); ok("A06", "mount after the save", s2.row("job").age === "3h" || s2.row("job").age === "2h", s2.row("job").age);

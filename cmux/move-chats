@@ -1,5 +1,0 @@
-#!/usr/bin/env bash
-# Lists the Claude chats that are open in Orca. With --go it makes one cmux
-# workspace for each one. It stops nothing: that is move-one, on Enter.
-export PATH="$PATH:${ORCA_CHAT_DATA_DIR:-$HOME/.local/share/orca-chat}/bun-1.3.14/package/bin:$HOME/.bun/bin:/opt/homebrew/bin:/Applications/Orca.app/Contents/Resources/bin"
-exec bun "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../lib/move.ts" chats "$@"
