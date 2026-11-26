@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# Installs the cmux agent-chat sidecar (GPL-3, not vendored in this repo) at a
+# pinned commit into ~/.local/share/orca-chat/cmux-src. Safe to run again.
+#
+# The sidecar lockfile (bun.lock) needs Bun 1.2 or later. Bun 1.1 ignores it
+# without an error and resolves newer packages. So a pinned Bun goes next to the
+# sidecar, for the install and for the server. The user's own Bun stays as it is.
+set -euo pipefail
+
+COMMIT=12023d89feb5425c766ba05e8d8e4cfc176e3991 # tag v0.65.2.2
+REMOTE=https://github.com/manaflow-ai/cmux.git
+BUN_VERSION=1.3.14
+BUN_SHA512='Omj20SuiHBOUjUBIyqtkNjSUIjOtEOJwmbix/ZyFH4BaQ6OZTaaRWIR4TjHVz0yadHgli6lLTiAh1uarnvD49A=='
+DATA="${ORCA_CHAT_DATA_DIR:-$HOME/.local/share/orca-chat}"
+SRC="$DATA/cmux-src"
+BUN="$DATA/bun-$BUN_VERSION/package/bin/bun"
+
+die() { echo "install: $*" >&2; exit 1; }
+for tool in git curl openssl tar; do
+  command -v "$tool" >/dev/null || die "$tool is not on PATH"
+done
+[ "$(uname -sm)" = "Darwin arm64" ] || die "only macOS on Apple silicon is supported"
+
+if [ ! -x "$BUN" ]; then
+  mkdir -p "$DATA/bun-$BUN_VERSION"
+  tgz="$DATA/bun-$BUN_VERSION/bun.tgz"
+  curl -fsSL -o "$tgz" "https://registry.npmjs.org/@oven/bun-darwin-aarch64/-/bun-darwin-aarch64-$BUN_VERSION.tgz"
+  [ "$(openssl dgst -sha512 -binary "$tgz" | openssl base64 -A)" = "$BUN_SHA512" ] || die "the Bun archive has the wrong checksum: $tgz"
+  tar -xzf "$tgz" -C "$DATA/bun-$BUN_VERSION"
+fi
+[ "$("$BUN" --version)" = "$BUN_VERSION" ] || die "the pinned Bun does not run: $BUN"
+
+mkdir -p "$SRC"
+[ -d "$SRC/.git" ] || git -C "$SRC" init -q
+git -C "$SRC" remote get-url origin >/dev/null 2>&1 || git -C "$SRC" remote add origin "$REMOTE"
+[ "$(git -C "$SRC" remote get-url origin)" = "$REMOTE" ] || die "$SRC has another origin"
+
+# Non-cone sparse checkout. The server imports its UI strings from web/messages.
+git -C "$SRC" sparse-checkout set --no-cone '/agent-chat/' '/web/messages/*.json' '/LICENSE*'
+if [ "$(git -C "$SRC" rev-parse -q --verify HEAD 2>/dev/null || true)" != "$COMMIT" ]; then
+  git -c http.version=HTTP/1.1 -C "$SRC" fetch -q --depth 1 --filter=blob:none origin "$COMMIT"
+  git -c http.version=HTTP/1.1 -C "$SRC" checkout -q --detach "$COMMIT"
+fi
+[ "$(git -C "$SRC" rev-parse HEAD)" = "$COMMIT" ] || die "wrong commit in $SRC"
+git -C "$SRC" diff --quiet HEAD -- agent-chat || die "$SRC/agent-chat has local changes"
+
+(cd "$SRC/agent-chat" && "$BUN" install --frozen-lockfile --ignore-scripts --production)
+[ -d "$SRC/agent-chat/node_modules/react" ] || die "the dependencies are missing"
+git -C "$SRC" diff --quiet HEAD -- agent-chat || die "bun install changed tracked files"
+echo "orca-chat sidecar ready: $SRC/agent-chat (total $(du -sh "$DATA" | cut -f1))"

@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Run it in a cmux terminal before claude or codex: the browser pane of this workspace
+# shows the chat of this terminal. With --new (a new workspace) that pane also loses
+# the address bar of cmux. With --project the workspace also gets the name of the project,
+# and --tab adds the chat of a new terminal tab to it. It never fails, so the agent always starts.
+export PATH="$PATH:${ORCA_CHAT_DATA_DIR:-$HOME/.local/share/orca-chat}/bun-1.3.14/package/bin:$HOME/.bun/bin:/opt/homebrew/bin:/Applications/Orca.app/Contents/Resources/bin"
+bun "$(dirname "$(realpath "${BASH_SOURCE[0]}")")/../lib/cmux.ts" "$@" </dev/null || echo "cmux-chat-open: no chat, the agent starts without it" >&2
+exit 0

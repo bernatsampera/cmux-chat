@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# Pick a Markdown file of this project, newest first, and open it in the cmux
+# viewer, as a tab of the pane that has the chat. A pasted path works too.
+export PATH="$PATH:/opt/homebrew/bin"
+cmux="${CMUX_BUNDLED_CLI_PATH:-cmux}"
+stop() { echo "md-open: $1. Press a key." >&2; read -rsn1 </dev/tty; exit 1; }
+root="$(git rev-parse --show-toplevel 2>/dev/null || pwd -P)"
+cd "$root" || stop "no folder $root"
+out="$(fd --no-ignore-vcs --strip-cwd-prefix -H -E .git -E node_modules -E .venv -E vendor -t f -e md -e mdx -e markdown -X stat -f '%m %N' -- | sort -rn | cut -d' ' -f2- |
+  fzf --scheme=path --tiebreak=index --layout=reverse --print-query --prompt='Markdown > ' --preview='head -200 -- {}' --preview-window='right,50%,wrap,<90(hidden)')"
+code=$?
+[ $code = 130 ] && exit 0
+query="$(sed -n 1p <<<"$out")" file="$(sed -n 2p <<<"$out")"
+case "$query" in '~/'*) query="$HOME/${query#\~/}" ;; esac
+if [ -n "$query" ] && [ -f "$query" ]; then file="$query"; fi
+[ -n "$file" ] || stop "no file matches: $query"
+case "$file" in /*) ;; *) file="$root/${file#./}" ;; esac
+[ -f "$file" ] || stop "no file $file"
+pane="$(printf '{"workspace_id":"%s"}' "$CMUX_WORKSPACE_ID" | "$cmux" rpc surface.list - 2>/dev/null | jq -r 'first(.surfaces[]|select(.type=="browser" and (.title|test("^Chat(:|$)")))|.pane_id) // empty' 2>/dev/null)"
+# In a workspace with chat tabs the pages have the names of the chats.
+[ -n "$pane" ] || pane="$(printf '{"workspace_id":"%s"}' "$CMUX_WORKSPACE_ID" | "$cmux" rpc system.tree - 2>/dev/null | jq -r 'first(.windows[].workspaces[].panes[].surfaces[]|select(.type=="browser" and (.url//""|test("^http://127\\.0\\.0\\.1:47739/[^/]+/follow\\?cmux=")))|.pane_id) // empty' 2>/dev/null)"
+err="$("$cmux" open "$file" --workspace "$CMUX_WORKSPACE_ID" ${pane:+--pane "$pane"} --focus true 2>&1 >/dev/null)" || stop "$err"

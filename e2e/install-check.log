@@ -1,0 +1,3 @@
+PASS fresh install, example projects, both rendered configs, home menu and React
+PASS second install preserved projects and the existing cmux config
+PASS replacement saved cmux.json.20261126095841.bak with the original contents

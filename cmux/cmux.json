@@ -1,0 +1,323 @@
+{
+  "app": {
+    "tabBarVisibility": "multiple-tabs",
+    "reorderOnNotification": false
+  },
+  "commands": [
+    {
+      "name": "Claude + chat",
+      "description": "Claude Code below, its read-only chat above",
+      "keywords": [
+        "claude",
+        "chat"
+      ],
+      "workspace": {
+        "layout": {
+          "direction": "vertical",
+          "split": 0.88,
+          "children": [
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "type": "browser",
+                    "name": "Chat",
+                    "url": "data:text/html;base64,PCFkb2N0eXBlIGh0bWw+PGh0bWwgc3R5bGU9ImJhY2tncm91bmQ6IzFkMWQxZDtjb2xvci1zY2hlbWU6ZGFyayI+"
+                  }
+                ]
+              }
+            },
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "type": "terminal",
+                    "name": "Claude",
+                    "cwd": ".",
+                    "command": "__ROOT__/bin/cmux-chat-open --new; CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --plugin-dir __ROOT__/mods/tall-prompt --plugin-dir __ROOT__/mods/live-text",
+                    "focus": true
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Claude + chat: resume",
+      "description": "Pick an old conversation of this folder",
+      "keywords": [
+        "claude",
+        "chat"
+      ],
+      "workspace": {
+        "layout": {
+          "direction": "vertical",
+          "split": 0.88,
+          "children": [
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "type": "browser",
+                    "name": "Chat",
+                    "url": "data:text/html;base64,PCFkb2N0eXBlIGh0bWw+PGh0bWwgc3R5bGU9ImJhY2tncm91bmQ6IzFkMWQxZDtjb2xvci1zY2hlbWU6ZGFyayI+"
+                  }
+                ]
+              }
+            },
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "type": "terminal",
+                    "name": "Claude",
+                    "cwd": ".",
+                    "command": "__ROOT__/bin/cmux-chat-open --new; CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --plugin-dir __ROOT__/mods/tall-prompt --plugin-dir __ROOT__/mods/live-text --resume",
+                    "focus": true
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Claude + chat: worktree",
+      "description": "Pick a git worktree of this project",
+      "keywords": [
+        "claude",
+        "chat"
+      ],
+      "workspace": {
+        "layout": {
+          "direction": "vertical",
+          "split": 0.88,
+          "children": [
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "type": "browser",
+                    "name": "Chat",
+                    "url": "data:text/html;base64,PCFkb2N0eXBlIGh0bWw+PGh0bWwgc3R5bGU9ImJhY2tncm91bmQ6IzFkMWQxZDtjb2xvci1zY2hlbWU6ZGFyayI+"
+                  }
+                ]
+              }
+            },
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "type": "terminal",
+                    "name": "Claude",
+                    "cwd": ".",
+                    "command": "d=$(git worktree list | fzf | cut -d\" \" -f1) && [ -n \"$d\" ] && cd \"$d\" && { __ROOT__/bin/cmux-chat-open --new; CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN=1 claude --plugin-dir __ROOT__/mods/tall-prompt --plugin-dir __ROOT__/mods/live-text; }",
+                    "focus": true
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Codex + chat",
+      "description": "Codex below, its read-only chat above",
+      "keywords": [
+        "codex",
+        "chat"
+      ],
+      "workspace": {
+        "layout": {
+          "direction": "vertical",
+          "split": 0.88,
+          "children": [
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "type": "browser",
+                    "name": "Chat",
+                    "url": "data:text/html;base64,PCFkb2N0eXBlIGh0bWw+PGh0bWwgc3R5bGU9ImJhY2tncm91bmQ6IzFkMWQxZDtjb2xvci1zY2hlbWU6ZGFyayI+"
+                  }
+                ]
+              }
+            },
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "type": "terminal",
+                    "name": "Codex",
+                    "cwd": ".",
+                    "command": "__ROOT__/bin/cmux-chat-open --new; codex --no-daemon --no-alt-screen",
+                    "focus": true
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Codex + chat: resume",
+      "description": "Pick an old conversation of this folder",
+      "keywords": [
+        "codex",
+        "chat"
+      ],
+      "workspace": {
+        "layout": {
+          "direction": "vertical",
+          "split": 0.88,
+          "children": [
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "type": "browser",
+                    "name": "Chat",
+                    "url": "data:text/html;base64,PCFkb2N0eXBlIGh0bWw+PGh0bWwgc3R5bGU9ImJhY2tncm91bmQ6IzFkMWQxZDtjb2xvci1zY2hlbWU6ZGFyayI+"
+                  }
+                ]
+              }
+            },
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "type": "terminal",
+                    "name": "Codex",
+                    "cwd": ".",
+                    "command": "__ROOT__/bin/cmux-chat-open --new; codex resume --no-daemon --no-alt-screen",
+                    "focus": true
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Codex + chat: worktree",
+      "description": "Pick a git worktree of this project",
+      "keywords": [
+        "codex",
+        "chat"
+      ],
+      "workspace": {
+        "layout": {
+          "direction": "vertical",
+          "split": 0.88,
+          "children": [
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "type": "browser",
+                    "name": "Chat",
+                    "url": "data:text/html;base64,PCFkb2N0eXBlIGh0bWw+PGh0bWwgc3R5bGU9ImJhY2tncm91bmQ6IzFkMWQxZDtjb2xvci1zY2hlbWU6ZGFyayI+"
+                  }
+                ]
+              }
+            },
+            {
+              "pane": {
+                "surfaces": [
+                  {
+                    "type": "terminal",
+                    "name": "Codex",
+                    "cwd": ".",
+                    "command": "d=$(git worktree list | fzf | cut -d\" \" -f1) && [ -n \"$d\" ] && cd \"$d\" && { __ROOT__/bin/cmux-chat-open --new; codex --no-daemon --no-alt-screen; }",
+                    "focus": true
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "actions": {
+    "claude-chat": {
+      "type": "workspaceCommand",
+      "title": "Claude + chat",
+      "commandName": "Claude + chat"
+    },
+    "claude-chat-resume": {
+      "type": "workspaceCommand",
+      "title": "Claude + chat: resume",
+      "commandName": "Claude + chat: resume"
+    },
+    "claude-chat-worktree": {
+      "type": "workspaceCommand",
+      "title": "Claude + chat: worktree",
+      "commandName": "Claude + chat: worktree"
+    },
+    "codex-chat": {
+      "type": "workspaceCommand",
+      "title": "Codex + chat",
+      "commandName": "Codex + chat"
+    },
+    "codex-chat-resume": {
+      "type": "workspaceCommand",
+      "title": "Codex + chat: resume",
+      "commandName": "Codex + chat: resume"
+    },
+    "codex-chat-worktree": {
+      "type": "workspaceCommand",
+      "title": "Codex + chat: worktree",
+      "commandName": "Codex + chat: worktree"
+    },
+    "open-markdown": {
+      "type": "command",
+      "title": "Open Markdown file",
+      "description": "Pick a Markdown file of this project and read it next to the chat",
+      "keywords": [
+        "md",
+        "markdown",
+        "file",
+        "read"
+      ],
+      "command": "exec __ROOT__/bin/md-open",
+      "target": "newTabInCurrentPane",
+      "shortcut": "cmd+shift+x"
+    }
+  },
+  "workspaceGroups": {
+    "byCwd": {
+      "__HOME__": {
+        "contextMenu": [
+          {
+            "action": "claude-chat"
+          },
+          {
+            "action": "claude-chat-resume"
+          },
+          {
+            "action": "claude-chat-worktree"
+          },
+          {
+            "action": "codex-chat"
+          },
+          {
+            "action": "codex-chat-resume"
+          },
+          {
+            "action": "codex-chat-worktree"
+          },
+          {
+            "action": "newWorkspace"
+          }
+        ]
+      }
+    }
+  }
+}

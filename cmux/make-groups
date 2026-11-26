@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+# Makes one pinned, collapsed cmux group per project in projects.txt. Run it in a
+# cmux terminal. A second run only adds what is missing. It never removes anything.
+# The key is the folder, so a new name in projects.txt renames the same group.
+[ -n "${CMUX_WORKSPACE_ID:-}" ] || { echo "make-groups: run this inside cmux" >&2; exit 1; }
+have="$(set -o pipefail; cmux workspace-group list --json | jq -r '.. | objects | .name? // empty')" || { echo "make-groups: cmux did not answer" >&2; exit 1; }
+bad=0
+while IFS='|' read -r name path; do
+  name="$(xargs <<<"$name")" path="$(xargs <<<"$path")" path="${path/#\~/$HOME}"
+  case "$name" in ''|'#'*) continue ;; esac
+  [ -d "$path" ] || { echo "$name: no folder $path"; continue; }
+  grep -qxF -- "$name" <<<"$have" && { echo "$name: already there"; continue; }
+  id="$(cmux workspace-group create --name "$name" --cwd "$path" --idempotency-key "project:$path" </dev/null | grep -oE 'workspace_group:[0-9]+' | head -1)"
+  [ -n "$id" ] || { echo "$name: FAILED"; bad=1; continue; }
+  cmux workspace-group rename "$id" --name "$name" </dev/null >/dev/null && cmux workspace-group pin "$id" </dev/null >/dev/null && cmux workspace-group collapse "$id" </dev/null >/dev/null && echo "$name: made" || { echo "$name: made, but not pinned or collapsed"; bad=1; }
+done < "${1:-${CMUX_CHAT_PROJECTS:-$HOME/.config/cmux-chat/projects.txt}}"
+exit $bad

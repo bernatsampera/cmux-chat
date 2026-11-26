@@ -1,0 +1,102 @@
+--- cmux-sidebar.js
++++ cmux-sidebar.js
+@@ -308,6 +308,38 @@
+ const [finishedVersion, setFinishedVersion] = signal("");
+ const [recentVersion, setRecentVersion] = signal("");
+ const [staleVersion, setStaleVersion] = signal("");
++
++// Last activity (local patch, sidebar-age.patch): the last prompt or the end
++// of an observed turn. cmux forgets latestAt at a restart, so the time is also
++// saved at the end of the workspace description.
++const LAST = /(?:^| \| )last active (\S+)$/;
++const endedAt = new Map(); // id -> wall time of the last observed end of a turn
++const saved = new Map(); // id -> newest time sent to cmux
++const [endedVersion, setEndedVersion] = signal(0);
++const savedTime = (w) => (Date.parse(LAST.exec(w.description ?? "")?.[1] ?? "") || 0) / 1000;
++const knownTime = (w) => Math.max(w.latestAt ?? 0, endedAt.get(w.id) ?? 0, saved.get(w.id) ?? 0, savedTime(w));
++function saveTime(w) {
++  const at = knownTime(w);
++  if (at - Math.max(savedTime(w), saved.get(w.id) ?? 0) < 60) return;
++  saved.set(w.id, at);
++  const text = (w.description ?? "").replace(LAST, "");
++  const stamp = "last active " + new Date(at * 1000).toISOString().slice(0, 16) + "Z";
++  cmux("workspace.action", { action: "set_description", workspace_id: w.id, description: text ? text + " | " + stamp : stamp });
++}
++// Seconds since the last activity, or null. An agent record is the last
++// choice: opening or quitting a session bumps it.
++function idleSeconds(w) {
++  endedVersion();
++  minute();
++  const at = (w && (knownTime(w) || Math.max(0, ...(w.agents || []).map((a) => a.lastActivityAt ?? 0)))) || 0;
++  return at ? Math.max(0, wallNow() - at) : null;
++}
++function ageText(s) {
++  if (s < 60) return "now";
++  if (s < 3600) return Math.floor(s / 60) + "m";
++  if (s < 86400) return Math.floor(s / 3600) + "h";
++  return s < 14 * 86400 ? Math.floor(s / 86400) + "d" : Math.floor(s / (7 * 86400)) + "w";
++}
+ computed(() => {
+   const ws = wsList();
+   minute();
+@@ -319,6 +351,7 @@
+   for (const w of ws) {
+     present.add(w.id);
+     const busy = busyAgents(w);
++    const wasStale = stale.has(w.id);
+     const staleNow = busy.length > 0 && allStale(busy, now);
+     if (staleNow) stale.add(w.id);
+     else stale.delete(w.id);
+@@ -328,8 +361,13 @@
+       finished.delete(w.id);
+     } else if (wasWorking.has(w.id)) {
+       finishedAt.set(w.id, now);
++      if (!wasStale) {
++        endedAt.set(w.id, now);
++        setEndedVersion(now);
++      }
+       if (!isSelected(w)) finished.add(w.id);
+     }
++    saveTime(w);
+     // The later of the observed and the recorded finish wins.
+     const told = answeredAt(w, now);
+     let at = finishedAt.get(w.id) ?? null;
+@@ -1458,6 +1496,9 @@
+   const state = memo(() => activity(w()));
+   const recentShown = memo(() => isRecent(w()));
+   const color = memo(() => titleColor(w()));
++  const idle = memo(() => (state() === "working" ? 0 : idleSeconds(w())));
++  const age = memo(() => (state() === "working" || idle() === null || unread() > 0 ? "" : ageText(idle())));
++  const fade = memo(() => (idle() === null ? "secondary" : idle() < 3600 ? "primary" : idle() < 86400 ? "secondary" : "tertiary"));
+   // Dot, clock, favorite bookmark, and breadcrumb mount only while shown:
+   // every mounted node costs the host work on each scroll frame, and most
+   // rows show none of them. A row without a dot keeps its slot as leading
+@@ -1465,7 +1506,7 @@
+   const leading = memoJSON(() =>
+     [state() && "dot", recentShown() && "clock", pinned() && "pin", crumb() && "crumb"].filter(Boolean),
+   );
+-  const badge = memoJSON(() => (unread() > 0 ? ["badge"] : []));
++  const badge = memoJSON(() => (unread() > 0 ? ["badge"] : age() ? ["age"] : []));
+   // The title owns the FULL row width; badge and close button FLOAT over its
+   // trailing edge (ZStack trailing) instead of reserving layout. No fades
+   // anywhere (they read as glitches when they appear); overflow truncates
+@@ -1488,13 +1529,14 @@
+         .font(13)
+         .lineLimit(1)
+         .truncation("tail")
+-        .color(memo(() => color() ?? (selected() ? "primary" : "secondary"))),
++        .color(memo(() => color() ?? (selected() ? "primary" : fade()))),
+     ])
++      .paddingTrailing(memo(() => (age() ? 32 : 0)))
+       .frame({ maxWidth: "infinity" }),
+-    ZStack({}, [
+-      // Unread badge at rest; on hover it yields to the close button.
+-      ForEach({ items: badge, key: (k) => k }, () =>
+-        Text(memo(() => String(unread())))
++    ZStack({ alignment: "trailing" }, [
++      // Unread badge, else the age, at rest; on hover it yields to the close button.
++      ForEach({ items: badge, key: (k) => k }, (_, k) =>
++        k === "age" ? Text(age).font(11).color("tertiary").lineLimit(1).hideOnHover() : Text(memo(() => String(unread())))
+           .font("caption2").bold().color("white")
+           .paddingHorizontal(5)
+           .paddingVertical(1)

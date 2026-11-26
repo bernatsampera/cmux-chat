@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Not in use now (the / menu opens in the hidden half). For the cmux commands, first on PATH: Claude in a tmux screen of two times the
+# rows of the pane, and the pane shows the bottom half. Fullscreen Claude keeps its
+# input and status in that half (the conversation is above), and only it has the mouse.
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)" path=""
+IFS=: read -ra parts <<<"$PATH"
+for p in "${parts[@]}"; do [ "$p" = "$here" ] || path="$path${path:+:}$p"; done
+export PATH="$path"
+tmux="$(command -v tmux)"
+size="$(stty size 2>/dev/null)"
+[ -n "$tmux" ] && [ -t 0 ] && [ -t 1 ] && [ "${size% *}" -gt 0 ] 2>/dev/null || exec claude "$@"
+rows="${size% *}" cols="${size#* }" sock="cmux-claude-$$"
+unset TMUX TMUX_PANE
+t() { "$tmux" -L "$sock" "$@"; }
+follow="run-shell \"'$tmux' -L $sock resize-window -t c -x #{client_width} -y #{e|*|:#{client_height},2}; '$tmux' -L $sock refresh-client -t '#{client_name}' -D 500\""
+t -f /dev/null new-session -d -s c -x "$cols" -y "$((rows * 2))" -e "PATH=$PATH" -- env -u TMUX -u TMUX_PANE claude "$@" || exec claude "$@"
+t set -g status off \; set -g mouse on \; set -g escape-time 0 \; set -g focus-events on \; set -g set-clipboard on \; set -g allow-passthrough on \; set -g extended-keys on \; set -g prefix None \; set -g prefix2 None \; set -g window-size manual \; set -ga terminal-features ',*:RGB:hyperlinks:extkeys:clipboard' \; set-hook -g client-attached "$follow" \; set-hook -g client-resized "$follow" >/dev/null 2>&1
+exec "$tmux" -L "$sock" attach -t c \; set -g destroy-unattached on

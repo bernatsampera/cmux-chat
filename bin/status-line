@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# The first two lines of the user's own Claude status, on one line: a short
+# terminal below the chat has no room for more.
+export PATH="$PATH:/opt/homebrew/bin"
+command="$(jq -r '.statusLine.command // empty' "${CLAUDE_CONFIG_DIR:-$HOME/.claude}/settings.json" 2>/dev/null)"
+case "$command" in ''|*/status-line*) exit 0 ;; esac
+line="$(perl -e 'alarm 6; exec @ARGV' bash -c "$command" 2>/dev/null | grep -v '^[[:space:]]*$' | head -2 | awk 'NR > 1 { printf " │ " } { printf "%s", $0 }')"
+[ -z "$line" ] || printf '%s\033[0m\n' "$line"

@@ -1,0 +1,116 @@
+#!/usr/bin/env bun
+// The CMUX_BUNDLED_CLI_PATH shim: `orca-rpc rpc <method> <json>`. It types into
+// one exact Orca terminal, or it refuses. It never uses the active terminal.
+import { existsSync, statSync } from "node:fs";
+import { join } from "node:path";
+import { AGENTS, SESSION_ID, STATE_DIR, UUID, claudeLive, matchLeaf, orca, pidStart, readStore, refuse, run, writePrivate, type Agent, type Entry, type Terminal } from "../lib/common";
+
+const MAX_TEXT_BYTES = 200_000;
+const INTERRUPT_GAP_MS = 5_000;
+
+function activeTarget(sessionId: unknown): { agent: Agent; entry: Entry } {
+  if (typeof sessionId !== "string" || !SESSION_ID.test(sessionId)) refuse("the session id is not valid");
+  const hits = AGENTS.flatMap((agent) => {
+    const sessions = readStore(agent).sessions;
+    return Object.hasOwn(sessions, sessionId) ? [{ agent, entry: sessions[sessionId] }] : [];
+  });
+  if (hits.length !== 1) refuse(hits.length ? "the session id is in two stores" : "this session is not bound to a terminal, run orca-chat in it");
+  requireActive(hits[0].agent, hits[0].entry.surfaceId, sessionId);
+  return hits[0];
+}
+
+function requireActive(agent: Agent, leaf: string, sessionId: string) {
+  if (!UUID.test(leaf)) refuse("the stored leaf id is not valid");
+  for (const other of AGENTS) {
+    const active = readStore(other).activeSessionsBySurface[leaf]?.sessionId;
+    if (other === agent ? active !== sessionId : active !== undefined) {
+      refuse("another session is now bound to this terminal, open the chat of that session");
+    }
+  }
+}
+
+function requireLiveAgent(agent: Agent, entry: Entry) {
+  if (!entry.agentPid || !entry.agentPidStart || pidStart(entry.agentPid) !== entry.agentPidStart) refuse("the agent process has exited, run orca-chat in the new session");
+  if (agent !== "claude") return;
+  const live = claudeLive(entry.agentPid);
+  if (live?.sessionId !== entry.sessionId) refuse("Claude Code has another session now, run orca-chat again in the terminal");
+}
+
+async function liveTerminal(agent: Agent, entry: Entry): Promise<Terminal> {
+  const term = await matchLeaf(entry.surfaceId);
+  if (term.writable !== true || term.orphaned === true) refuse("the Orca terminal is not writable");
+  if (term.agentIdentity !== agent) refuse(`Orca reports ${term.agentIdentity ?? "no agent"} in this terminal, not ${agent}`);
+  return term;
+}
+
+async function send(params: any) {
+  const { agent, entry } = activeTarget(params.session_id);
+  if (typeof params.text !== "string") refuse("the text is missing");
+  // LF only: a bare CR is Enter. Control bytes must not reach the terminal.
+  const text = params.text.replace(/\r\n?/g, "\n").replace(/[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
+  if (!text.trim()) refuse("the text is empty");
+  if (Buffer.byteLength(text) > MAX_TEXT_BYTES) refuse(`the text is longer than ${MAX_TEXT_BYTES} bytes`);
+  requireLiveAgent(agent, entry);
+  if (agent === "claude" && claudeLive(entry.agentPid)?.status === "waiting") refuse("Claude waits for an answer in the terminal, answer it there");
+  const term = await liveTerminal(agent, entry);
+  // `--flag=value` is the one form where Orca never reads the value as a flag.
+  const res = await orca(["terminal", "send", `--terminal=${term.handle}`, `--text=${text}`, "--enter", "--json"]);
+  const body = parse(res.stdout);
+  const receipt = body?.result?.send;
+  if (res.code !== 0 || body?.ok !== true || receipt?.accepted !== true) {
+    refuse(res.code === null ? "orca did not answer in time, check the terminal before you send again" : `orca did not accept the text${receipt?.refusedReason ? ` (${receipt.refusedReason})` : ""}`);
+  }
+  // Orca wraps the text in a bracketed paste only when it sees the agent in the
+  // foreground. Without a paste receipt it typed the raw text.
+  const provider = receipt.prompt?.provider;
+  if (text.includes("\n") && (!provider || provider === "unsupported" || provider === "old-host")) {
+    refuse("the text was typed, but not as a paste, so check the terminal and do not send it again");
+  }
+  return { handle: term.handle, accepted: true };
+}
+
+async function interrupt(params: any) {
+  const { agent, entry } = activeTarget(params.session_id);
+  requireLiveAgent(agent, entry);
+  const term = await liveTerminal(agent, entry);
+  // Orca sends Ctrl-C. Two fast ones close the agent.
+  const mark = join(STATE_DIR, `interrupt-${entry.surfaceId}`);
+  if (existsSync(mark) && Date.now() - statSync(mark).mtimeMs < INTERRUPT_GAP_MS) refuse("an interrupt was sent less than 5 seconds ago");
+  writePrivate(mark, "");
+  const res = await orca(["terminal", "send", `--terminal=${term.handle}`, "--interrupt", "--json"]);
+  const body = parse(res.stdout);
+  if (res.code !== 0 || body?.ok !== true || body?.result?.send?.accepted !== true) refuse("orca did not accept the interrupt");
+  return { handle: term.handle, accepted: true };
+}
+
+async function focus(params: any) {
+  const leaf = String(params.surface_id ?? "").toLowerCase();
+  if (!UUID.test(leaf)) refuse("the surface id is not valid");
+  if (!AGENTS.some((a) => readStore(a).activeSessionsBySurface[leaf])) refuse("this terminal has no bound session");
+  const term = await matchLeaf(leaf);
+  const res = await orca(["terminal", "switch", `--terminal=${term.handle}`, "--json"]);
+  if (res.code !== 0) refuse("orca did not switch to the terminal");
+  return { handle: term.handle };
+}
+
+function parse(text: string): any {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
+run(async () => {
+  const [verb, method, json] = process.argv.slice(2);
+  const methods: Record<string, (p: any) => unknown> = {
+    "mobile.chat.send": send,
+    "mobile.chat.interrupt": interrupt,
+    "surface.focus": focus,
+  };
+  if (verb !== "rpc") refuse("usage: orca-rpc rpc <method> <json>");
+  if (!Object.hasOwn(methods, method ?? "")) refuse(`the method ${method} is not supported`);
+  const params = parse(json ?? "");
+  if (!params || typeof params !== "object") refuse("the parameters are not JSON");
+  console.log(JSON.stringify(await methods[method](params)));
+});

@@ -1,0 +1,189 @@
+--- cmux-sidebar.js
++++ cmux-sidebar.js
+@@ -28,6 +28,9 @@
+   recentClock: false,
+   // The gear in the top bar that opens the Settings page. Hidden for now.
+   settingsPage: false,
++  // Projects only (local patch, sidebar-projects.patch): a group lists no
++  // chats, its header shows what they do. The chats are in the strip of the page.
++  projectsOnly: true,
+ };
+ 
+ // --- change-only data ------------------------------------------------------------
+@@ -711,9 +714,47 @@
+ // order. An agent heartbeat or a title edit leaves it unchanged, so the tree
+ // is not rebuilt for them.
+ const structure = memoJSON(() =>
+-  visibleWorkspaces().map((w) => ({ id: w.id, group: w.group ?? null, pinned: !!w.pinned })),
++  visibleWorkspaces().map((w) => ({ id: w.id, group: w.group ?? null, pinned: !!w.pinned, chat: hasChat(w) })),
+ );
+ 
++// --- projects only (local patch, sidebar-projects.patch) -------------------------
++// A chat: an agent, and next to its terminal the page of the chat.
++function hasChat(w) {
++  return !!w && (w.agents || []).length > 0 && (w.tabCount ?? 0) > 1;
++}
++const [projectsOnly, setProjectsOnly] = signal(SETTINGS.projectsOnly);
++const WAITING_PINK = "#FF79C6";
++const CHAT_COLORS = { waiting: WAITING_PINK, working: WORKING_ORANGE, finished: FINISHED_GREEN };
++
++// "working" | "waiting" | "finished" | null
++function chatState(w) {
++  const state = activity(w);
++  if (state !== "working" && w && liveAgents(w).some((a) => a.status === "needs_input")) return "waiting";
++  return state;
++}
++
++// The chats that a header stands for: its own, and collapsed also those below it.
++const ownChats = (node) => [node.anchor, ...node.members].filter((w) => w?.chat).map((w) => w.id);
++function headerChats(node) {
++  if (!node || !projectsOnly()) return [];
++  const below = nodeCollapsed(node) ? descendantsOf(node) : [];
++  return [...new Set([...ownChats(node), ...below.filter((w) => w.chat).map((w) => w.id)])];
++}
++
++// The chat of each group that was open last. The runtime has no storage: a
++// mount forgets it, then the first chat counts.
++const lastOpen = new Map();
++computed(() => {
++  const w = wsSig(selectedId())();
++  if (w?.group && hasChat(w)) lastOpen.set(w.group, w.id);
++});
++
++function openProject(node) {
++  const chats = ownChats(node);
++  const last = lastOpen.get(node.group?.id);
++  selectWorkspace(chats.includes(last) ? last : chats[0] ?? node.anchor?.id);
++}
++
+ // Tree node: { key, group (null = virtual), segs, path, leaf, parent, depth,
+ // anchor, members (non-anchor rows), children (subgroup nodes), items
+ // (members + children in tabs order), pos (tabs position), refId }.
+@@ -979,6 +1020,7 @@
+   claimPendingSubgroup();
+   const editing = editingId();
+   const hidden = (id) => filtering() && !passesFilters(id);
++  const hiddenInGroup = (w) => (filtering() ? hidden(w.id) : projectsOnly() && w.chat);
+   const emit = (node, out) => {
+     const hid = "h:" + node.key;
+     const collapsed = nodeCollapsed(node);
+@@ -999,7 +1041,7 @@
+       // Collapsed: only working and finished-unseen descendants stay,
+       // flattened under the header (and only those the filters let through).
+       for (const w of descendantsOf(node)) {
+-        if (isActiveId(w.id) && !hidden(w.id)) {
++        if (isActiveId(w.id) && !hiddenInGroup(w)) {
+           out.push(wsEntry(w.id, editing, node.depth + 1, w.group, breadcrumb(w, node), node.key));
+         }
+       }
+@@ -1008,7 +1050,7 @@
+     const start = out.length;
+     for (const item of node.items) {
+       if (!item.ws) emit(item.node, out);
+-      else if (!hidden(item.ws.id)) out.push(wsEntry(item.ws.id, editing, node.depth + 1, node.group.id, ""));
++      else if (!hiddenInGroup(item.ws)) out.push(wsEntry(item.ws.id, editing, node.depth + 1, node.group.id, ""));
+     }
+     // The group's end: a thin slot at its parent's level, so a row dragged
+     // just below the group's last row leaves it. A run of ends steps out one
+@@ -1086,6 +1128,7 @@
+           Image("xmark").font(8).weight("bold").color("secondary"),
+         )),
+     ...(SETTINGS.settingsPage ? [panelIcon("gearshape", "Sidebar Settings", "settings")] : []),
++    barIcon("folder", "Projects only: hide the chats", projectsOnly, () => setProjectsOnly(!projectsOnly())),
+     panelIcon("questionmark.circle", "Sidebar Guide", "guide"),
+   ])
+     .paddingLeading(4)
+@@ -1102,7 +1145,11 @@
+ 
+ // A top bar icon that opens its panel, lit while the panel is open.
+ function panelIcon(systemName, label, name) {
+-  const open = memo(() => panel() === name);
++  return barIcon(systemName, label, () => panel() === name, () => togglePanel(name));
++}
++
++function barIcon(systemName, label, isOn, toggle) {
++  const open = memo(() => isOn());
+   return Image(systemName)
+     .font(12).color(memo(() => (open() ? "primary" : "tertiary")))
+     .padding(3)
+@@ -1110,7 +1157,7 @@
+     .background(memo(() => (open() ? "#7f7f7f3d" : null)))
+     .hoverBackground(memo(() => (open() ? "#7f7f7f3d" : "#7f7f7f24")))
+     .help(label)
+-    .onTap(() => togglePanel(name));
++    .onTap(toggle);
+ }
+ 
+ const panelCard = (children) =>
+@@ -1157,7 +1204,9 @@
+     guideSection("GROUPS"),
+     guideLine(Image("chevron.down").font(10).weight("semibold").color("tertiary"), "Fold; a folded group still lists working and finished rows"),
+     guideLine(Text("A/B").font(11).color("tertiary"), "A group named A/B shows as B inside A"),
+-    guideNote("Clicking a group header opens its first workspace."),
++    guideNote("Clicking a group header opens its first workspace. With projects only: its last open chat."),
++    guideLine(Image("folder").font(10).color("secondary"), "Projects only: a group lists no chats, its header counts them"),
++    guideLine(Circle({ size: 7 }).fill(WAITING_PINK), "Chats of the project that wait for your answer (orange: work, green: finished)"),
+     guideSection("TOP BAR"),
+     guideLine(Circle({ size: 7 }).fill(WORKING_ORANGE), "Active: show only working and finished rows"),
+     guideLine(Image("bookmark.fill").font(9).color(FAVORITE_RED), "Favorites: show only favorites"),
+@@ -1615,9 +1664,15 @@
+   const g = () => (groupId && groupById(groupId)) || { id: groupId, name: "", collapsed: false, pinned: false };
+   const anchorId = memo(() => (groupId ? g().anchorId : null));
+   const anchor = () => (anchorId() ? wsSig(anchorId())() : undefined);
+-  const selected = memo(() => isSelected(anchor()));
++  const chats = memoJSON(() => headerChats(nodeByKey(nodeKey)));
++  const selected = memo(() => isSelected(anchor()) || chats().some((id) => isSelected(wsSig(id)())));
++  const counts = memoJSON(() => {
++    const states = chats().map((id) => chatState(wsSig(id)()));
++    const out = Object.keys(CHAT_COLORS).map((k) => ({ k, n: states.filter((s) => s === k).length })).filter((c) => c.n);
++    return out.length || !states.length ? out : [{ k: "chats", n: states.length }];
++  });
+   const dropHere = memo(() => !!groupId && dropGroup() === groupId);
+-  const state = memo(() => activity(anchor()));
++  const state = memo(() => (chats().includes(anchorId()) ? null : activity(anchor())));
+   const recentShown = memo(() => isRecent(anchor()));
+   // The anchor's dot and clock mount only while shown, like a row's.
+   const marks = memoJSON(() => [state() && "dot", recentShown() && "clock"].filter(Boolean));
+@@ -1651,6 +1706,12 @@
+         (k === "dot" ? activityDot(state) : recentClock().paddingLeading(dotInset))),
+     ]).layoutPriority(1),
+     Spacer(),
++    // What its chats do, or how many there are.
++    ForEach({ items: counts, key: (c) => c.k }, (c, k) =>
++      HStack({ spacing: 3 }, [
++        ...(CHAT_COLORS[k] ? [Circle({ size: 7 }).fill(CHAT_COLORS[k])] : []),
++        Text(memo(() => String(c().n))).font(11).color(k === "chats" ? "tertiary" : "secondary").lineLimit(1),
++      ])),
+     // Hover-revealed `+`, styled like the row close button. Virtual headers
+     // have no group to create into, so theirs stays hidden and inert.
+     Image("plus")
+@@ -1671,12 +1732,17 @@
+     .background(memo(() => (dropHere() ? DROP_HEADER_TINT : selected() ? "#7f7f7f3d" : null)))
+     .hoverBackground(memo(() => (selected() ? "#7f7f7f3d" : "#7f7f7f1c")))
+     .frame({ maxWidth: "infinity" })
+-    .onTap(() => bulkClose() || selectWorkspace(anchor()?.id))
++    .onTap(() => {
++      const node = nodeByKey(nodeKey);
++      if (bulkClose()) return;
++      if (projectsOnly() && node) openProject(node);
++      else selectWorkspace(anchor()?.id);
++    })
+     .onDoubleTap(() => bulkClose() || setEditingId(hid))
+-    .contextMenu(groupMenu(entry, e, g, withNode, toggle));
++    .contextMenu(groupMenu(entry, e, g, withNode, toggle, anchor));
+ }
+ 
+-function groupMenu(entry, e, g, withNode, toggle) {
++function groupMenu(entry, e, g, withNode, toggle, anchor) {
+   const { groupId, nodeKey } = entry;
+   const hid = "h:" + nodeKey;
+   const targets = memoJSON(() => moveTargets(nodeByKey(nodeKey) ?? {}));
+@@ -1701,6 +1767,8 @@
+   if (!groupId) return [...items, ...guideMenuItems()];
+   return [
+     Button("New Workspace in Group", () => newWorkspaceIn(groupId)),
++    // With projects only, a click on the header opens a chat.
++    Button("Open First Workspace", () => selectWorkspace(anchor()?.id)),
+     ...items,
+     Divider(),
+     Button(memo(() => (g().pinned ? "Unpin Group" : "Pin Group")), () =>

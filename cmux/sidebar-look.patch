@@ -1,0 +1,159 @@
+--- cmux-sidebar.js
++++ cmux-sidebar.js
+@@ -950,6 +950,24 @@
+ // group to join). One shared list for every row's submenu.
+ const groupChoices = memoJSON(() => treeNodes().filter((n) => n.group).map(choice));
+ 
++// --- look (local patch, sidebar-look.patch) --------------------------------------
++// A section (a top-level group that holds projects) is a caption over its
++// projects, a line ends it. A project has an icon with its letter, in its own
++// color, and is a card while something is open in it.
++const PROJECT_COLORS = ["#6AA9FF", "#F1C36B", "#2DD4BF", "#FF8F7A", "#8BE9FD", "#C9A27E", "#B5CC6A", "#A3B8CC"];
++const SECTION_END_HEIGHT = 17;
++const CARD = "#7f7f7f1f";
++const SELECTED = "#6272a4b3";
++const isSection = (node) => !!node && node.depth === 0 && node.children.length > 0;
++// By the order of the names: two projects get the same color only after eight.
++const projectColors = memoJSON(() => {
++  const keys = treeNodes().filter((n) => !isSection(n)).map((n) => n.key).sort();
++  return Object.fromEntries(keys.map((k, i) => [k, PROJECT_COLORS[i % PROJECT_COLORS.length]]));
++});
++const letterIcon = (name) => (/^[a-z0-9]/i.test(name) ? name[0].toLowerCase() + ".square.fill" : "folder.fill");
++// The rows that unfolding shows.
++const hasRows = (node) => !!node && node.items.some((i) => !i.ws || filtering() || !projectsOnly() || !i.ws.chat);
++
+ // New Subgroup: the group (and its generated anchor workspace) arrives with
+ // a later data tick; flatEntries opens it for rename once it shows up. The
+ // parent chain is expanded first so that editor is actually visible.
+@@ -1555,6 +1573,9 @@
+   const leading = memoJSON(() =>
+     [state() && "dot", recentShown() && "clock", pinned() && "pin", crumb() && "crumb"].filter(Boolean),
+   );
++  // In a project a row stands under the name of the project, with an icon.
++  const inset = memo(() => (e().depth > 0 ? 16 : 0));
++  const glyph = memoJSON(() => (inset() && !state() ? ["glyph"] : []));
+   const badge = memoJSON(() => (unread() > 0 ? ["badge"] : age() ? ["age"] : []));
+   // The title owns the FULL row width; badge and close button FLOAT over its
+   // trailing edge (ZStack trailing) instead of reserving layout. No fades
+@@ -1563,6 +1584,8 @@
+   return ZStack({ alignment: "trailing" }, [
+     // Its frame leads, so no trailing Spacer is needed to left-align it.
+     HStack({ spacing: 0 }, [
++      ForEach({ items: glyph, key: (k) => k }, () =>
++        Image("arrow.turn.down.right").font(9).color("tertiary").frame({ width: ROW_DOT_SLOT })),
+       // Priority 1, like the title (the host's default for a lineLimit
+       // Text), so a long breadcrumb and title still share truncation.
+       ForEach({ items: leading, key: (k) => k, layoutPriority: 1 }, (_, k) => {
+@@ -1575,7 +1598,7 @@
+         return Text(crumb).font(13).color("tertiary").lineLimit(1).paddingTrailing(4);
+       }),
+       Text(memo(() => displayTitle(w())))
+-        .font(13)
++        .font(memo(() => (inset() ? 12 : 13)))
+         .lineLimit(1)
+         .truncation("tail")
+         .color(memo(() => color() ?? (selected() ? "primary" : fade()))),
+@@ -1605,13 +1628,13 @@
+         .onTap(() => closeWorkspace(w().id)),
+     ]),
+   ])
+-    .paddingLeading(memo(() => (state() ? 2 : 2 + ROW_DOT_SLOT)))
++    .paddingLeading(memo(() => 2 + inset() + (state() || glyph().length ? 0 : ROW_DOT_SLOT)))
+     .paddingTrailing(10)
+-    .paddingVertical(6)
++    .paddingVertical(memo(() => (inset() ? 4 : 6)))
+     .marginLeading(memo(() => e().depth * INDENT))
+     .cornerRadius(8)
+-    .background(memo(() => (multi() ? "#4C9EEB33" : dropHere() ? DROP_ROW_TINT : selected() ? "#7f7f7f3d" : null)))
+-    .hoverBackground(memo(() => (multi() ? "#4C9EEB33" : (selected() ? "#7f7f7f3d" : "#7f7f7f24"))))
++    .background(memo(() => (multi() ? "#4C9EEB33" : dropHere() ? DROP_ROW_TINT : selected() ? SELECTED : null)))
++    .hoverBackground(memo(() => (multi() ? "#4C9EEB33" : (selected() ? SELECTED : "#7f7f7f24"))))
+     .frame({ maxWidth: "infinity" })
+     .dragSet(memo(() => (multi() ? "multi" : null)))
+     .onTap((payload) => handleRowClick(w(), payload))
+@@ -1684,6 +1707,10 @@
+   };
+   // Folding mid bulk close would move the frozen list (see closeMany).
+   const toggle = withNode((node) => bulkClose() || toggleNode(node));
++  const section = memo(() => isSection(nodeByKey(nodeKey)));
++  const rows = memo(() => hasRows(nodeByKey(nodeKey)));
++  const live = memo(() => rows() || chats().length > 0);
++  const icon = memoJSON(() => (section() ? [] : ["icon"]));
+   return HStack({ spacing: 6 }, [
+     // The chevron toggles collapse; clicking anywhere else selects the
+     // group's anchor workspace (built-in sidebar behavior). Chevron only,
+@@ -1693,14 +1720,22 @@
+     Image("chevron.right")
+       .font(10).weight("semibold").color("tertiary")
+       .rotation(memo(() => (e().collapsed ? 0 : 90)))
+-      .frame({ width: 14, height: 16 })
++      .opacity(memo(() => (rows() ? 1 : 0)))
++      .frame({ width: 14, height: 18 })
+       .onTap(toggle),
++    ForEach({ items: icon, key: (k) => k }, () =>
++      Image(memo(() => letterIcon(e().leaf))).font(16)
++        .color(memo(() => projectColors()[nodeKey] ?? "secondary"))
++        .opacity(memo(() => (live() ? 1 : 0.4)))
++        .frame({ width: 18, height: 18 })),
+     // The anchor's own dot and clock overlay a leading inset that only opens
+     // while they show. The host auto-boosts only a bare truncating Text over
+     // sibling Spacers, so the wrapper needs the boost explicitly.
+     ZStack({ alignment: "leading" }, [
+-      Text(memo(() => e().leaf)).font(12).weight("semibold").lineLimit(1).truncation("tail")
+-        .color(memo(() => (selected() ? "primary" : "secondary")))
++      Text(memo(() => (section() ? e().leaf.toUpperCase() : e().leaf)))
++        .font(memo(() => (section() ? 10.5 : 13))).weight(memo(() => (section() ? "bold" : live() ? "semibold" : "regular")))
++        .lineLimit(1).truncation("tail")
++        .color(memo(() => (selected() || (live() && !section()) ? "primary" : section() ? "tertiary" : "secondary")))
+         .paddingLeading(memo(() => dotInset() + (recentShown() ? CLOCK_SLOT : 0))),
+       ForEach({ items: marks, key: (k) => k }, (_, k) =>
+         (k === "dot" ? activityDot(state) : recentClock().paddingLeading(dotInset))),
+@@ -1710,8 +1745,12 @@
+     ForEach({ items: counts, key: (c) => c.k }, (c, k) =>
+       HStack({ spacing: 3 }, [
+         ...(CHAT_COLORS[k] ? [Circle({ size: 7 }).fill(CHAT_COLORS[k])] : []),
+-        Text(memo(() => String(c().n))).font(11).color(k === "chats" ? "tertiary" : "secondary").lineLimit(1),
+-      ])),
++        Text(memo(() => String(c().n))).font(11).weight("medium").color(CHAT_COLORS[k] ?? "secondary").lineLimit(1),
++      ])
++        .paddingHorizontal(6)
++        .paddingVertical(1)
++        .cornerRadius(8)
++        .background(CHAT_COLORS[k] ? CHAT_COLORS[k] + "2e" : "#7f7f7f2e")),
+     // Hover-revealed `+`, styled like the row close button. Virtual headers
+     // have no group to create into, so theirs stays hidden and inert.
+     Image("plus")
+@@ -1729,8 +1768,8 @@
+     .paddingVertical(5)
+     .marginLeading(memo(() => e().depth * INDENT))
+     .cornerRadius(8)
+-    .background(memo(() => (dropHere() ? DROP_HEADER_TINT : selected() ? "#7f7f7f3d" : null)))
+-    .hoverBackground(memo(() => (selected() ? "#7f7f7f3d" : "#7f7f7f1c")))
++    .background(memo(() => (dropHere() ? DROP_HEADER_TINT : selected() ? SELECTED : live() && !section() ? CARD : null)))
++    .hoverBackground(memo(() => (selected() ? SELECTED : "#7f7f7f30")))
+     .frame({ maxWidth: "infinity" })
+     .onTap(() => {
+       const node = nodeByKey(nodeKey);
+@@ -1855,7 +1894,12 @@
+   if (entry.kind === "header") return entry.editing ? groupEditRow(entry, e) : groupHeader(entry, e);
+   // A group's end: empty, so nothing grabs it; its margin is the level a
+   // row dropped there takes (the host reads nesting from marginLeading).
+-  if (entry.kind === "end") return Spacer().frame({ height: GROUP_END_HEIGHT }).marginLeading(memo(() => e().depth * INDENT));
++  if (entry.kind === "end") {
++    if (entry.depth === 0 && isSection(nodeByKey(entry.nodeKey))) {
++      return HStack({ spacing: 0 }, [Divider().paddingHorizontal(8)]).frame({ height: SECTION_END_HEIGHT }).marginLeading(0);
++    }
++    return Spacer().frame({ height: GROUP_END_HEIGHT }).marginLeading(memo(() => e().depth * INDENT));
++  }
+   const w = wsSig(entry.wsId);
+   return entry.editing ? workspaceEditRow(w, e) : workspaceRow(w, e);
+ }
+@@ -1871,7 +1915,7 @@
+         // Empty while a panel is open: it takes the list's place.
+         items: memo(() => (panel() ? [] : flatEntries())),
+         key: (e) => e.id,
+-        spacing: 2,
++        spacing: 3,
+         onMove: handleMove,
+         onDragChange: handleDragChange,
+       },

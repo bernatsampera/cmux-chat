@@ -1,0 +1,59 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'HELP'
+Usage: ./install [--write-cmux-config]
+Requires Apple silicon macOS, cmux, git and curl. Warns if neither claude nor
+codex is on PATH. Downloads the pinned Bun and cmux sidecar using bin/install.
+Creates ~/.config/cmux-chat/projects.txt if missing and renders cmux.json and
+claude-settings.json next to it. Installs cmux.json if there is no live config.
+With --write-cmux-config, backs up an existing config as cmux.json.<timestamp>.bak
+before replacing it. Otherwise merge the rendered file yourself.
+Prints the cmux/setup and zsh start commands. Leaves Claude settings and .zshrc alone.
+HELP
+}
+write=false
+case "${1:-}" in
+  --help|-h) usage; exit 0 ;;
+  --write-cmux-config) write=true ;;
+  '') ;;
+  *) usage >&2; exit 2 ;;
+esac
+[ "$#" -le 1 ] || { usage >&2; exit 2; }
+root="$(cd "$(dirname "$0")" && pwd -P)"
+[ "$(uname -sm)" = "Darwin arm64" ] || { echo "Requires macOS on Apple silicon." >&2; exit 1; }
+for cmd in cmux git curl; do
+  command -v "$cmd" >/dev/null || { echo "Missing command: $cmd" >&2; exit 1; }
+done
+if ! command -v claude >/dev/null && ! command -v codex >/dev/null; then
+  echo "Warning: install Claude Code or Codex to start a chat." >&2
+fi
+"$root/bin/install"
+bun="${ORCA_CHAT_DATA_DIR:-$HOME/.local/share/orca-chat}/bun-1.3.14/package/bin/bun"
+config="$HOME/.config/cmux-chat"
+live="$HOME/.config/cmux/cmux.json"
+mkdir -p "$config" "$(dirname "$live")"
+[ -e "$config/projects.txt" ] || cp -n "$root/cmux/projects.example.txt" "$config/projects.txt"
+for name in cmux.json claude-settings.json; do
+  tmp="$(mktemp "$config/$name.XXXXXX")"
+  "$bun" "$root/lib/config.ts" "$name" > "$tmp"
+  mv -f "$tmp" "$config/$name"
+done
+if [[ -e "$live" || -L "$live" ]]; then
+  if "$write"; then
+    backup="$live.$(date +%Y%m%d%H%M%S).bak"
+    while [[ -e "$backup" ]]; do sleep 1; backup="$live.$(date +%Y%m%d%H%M%S).bak"; done
+    cp -p "$live" "$backup"
+    echo "Saved $backup"
+    tmp="$(mktemp "$live.XXXXXX")"
+    cp "$config/cmux.json" "$tmp"
+    mv -f "$tmp" "$live"
+  else
+    echo "Merge $config/cmux.json into $live, or run ./install --write-cmux-config."
+  fi
+else
+  cp -n "$config/cmux.json" "$live"
+fi
+printf 'Edit %s/projects.txt. In a cmux terminal run %q/cmux/setup\n' "$config" "$root"
+printf 'Optional zsh start line: %q %q start </dev/null\n' "$bun" "$root/lib/tabs.ts"

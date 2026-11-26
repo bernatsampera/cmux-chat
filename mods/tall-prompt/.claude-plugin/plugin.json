@@ -1,0 +1,1 @@
+{ "name": "tall-prompt", "version": "0.1.0", "description": "Hides the status line while the prompt has text", "types": "./types/index.d.ts" }

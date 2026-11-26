@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# Run it in a cmux terminal: loads the config, makes the groups, turns on the sidebar.
+[ -n "${CMUX_WORKSPACE_ID:-}" ] || { echo "setup: run this inside cmux" >&2; exit 1; }
+cmux reload-config </dev/null
+"$(dirname "$0")/make-groups"; groups=$?
+# The age of each chat, then the projects only, then their look. An update of cmux-sidebar replaces the file, then run this again.
+side="$HOME/.config/cmux/sidebars/cmux-sidebar.js"
+for p in sidebar-age sidebar-projects sidebar-look; do
+  grep -q "$p.patch" "$side" || patch -s -b -z ".$(date +%Y%m%d%H%M%S).$p.bak" "$side" "$(dirname "$0")/$p.patch" || echo "setup: $p.patch did not apply" >&2
+done
+# The helper of the project strip: cmux-chat-open starts it too, this is for after a restart of cmux.
+PATH="$PATH:${ORCA_CHAT_DATA_DIR:-$HOME/.local/share/orca-chat}/bun-1.3.14/package/bin:$HOME/.bun/bin" bun "$(dirname "$0")/../lib/tabs.ts" start </dev/null
+cmux sidebar validate cmux-sidebar </dev/null && cmux sidebar select cmux-sidebar </dev/null || exit 1
+exit $groups
