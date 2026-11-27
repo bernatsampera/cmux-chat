@@ -1,0 +1,630 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Chat appearance</title>
+<style>
+:root { color-scheme:dark; --fg:#f8f8f2; --text:var(--fg); --text-dim:#c0bfbb; --border:#555; --border-strong:#777; --accent:#afbcf0; --font-sans:system-ui,sans-serif; --font-mono:ui-monospace,monospace }
+* { box-sizing:border-box } body { margin:0; background:var(--bg-body); color:var(--text); font-family:var(--font-sans) }
+#messages { height:100vh; overflow:auto; padding-block:20px } .msg { padding-bottom:14px } .msg.user .body { padding:10px 14px; white-space:pre-wrap }
+.markdown-code { background:var(--bg-code) } button { color:inherit; background:var(--bg-raised); border:0; cursor:pointer }
+</style>
+<script id="cmux-chat-stick">(() => {
+  let el, pinned = true, frame = 0, drag = null, dragging = false, lastTop = 0, touchY, downUntil = 0;
+  const gap = () => el.scrollHeight - el.clientHeight - el.scrollTop;
+  function schedule() {
+    if (!frame) frame = requestAnimationFrame(() => {
+      frame = 0;
+      if (el && pinned && gap() > 2) el.scrollTop = el.scrollHeight;
+    });
+  }
+  const sizes = typeof ResizeObserver === 'function' && new ResizeObserver(schedule);
+  const changes = typeof MutationObserver === 'function' && new MutationObserver(sync);
+  function sync(records = []) {
+    const next = document.getElementById('messages'), replaced = next !== el;
+    if (replaced) { el = next; drag = null; downUntil = 0; touchY = undefined; }
+    if (replaced || records.some(r => r.target === el && r.type === 'childList') || !changes) {
+      if (sizes) { sizes.disconnect(); if (el) for (const node of [el, ...el.children]) sizes.observe(node); }
+      if (changes && replaced) {
+        changes.disconnect();
+        changes.observe(document, {childList: true, subtree: true});
+        if (el) changes.observe(el, {childList: true, subtree: true, attributes: true, characterData: true});
+      }
+    }
+    schedule();
+  }
+  if (!changes) setInterval(sync, 250);
+  const on = (type, fn) => document.addEventListener(type, fn, {capture: true, passive: true});
+  function intent(up) {
+    downUntil = up ? 0 : performance.now() + 500;
+    if (up) pinned = false;
+    else if (el && gap() <= 2) { pinned = true; schedule(); }
+  }
+  on('wheel', e => { if (el?.contains(e.target) && e.deltaY) intent(e.deltaY < 0); });
+  on('touchstart', e => { touchY = el?.contains(e.target) ? e.touches[0].clientY : undefined; });
+  on('touchmove', e => {
+    const y = e.touches[0].clientY;
+    if (touchY !== undefined && y !== touchY) { intent(y > touchY); touchY = y; }
+  });
+  on('keydown', e => {
+    if (e.key === 'End') { pinned = true; schedule(); }
+    else if (['ArrowUp','PageUp','Home','ArrowDown','PageDown',' '].includes(e.key))
+      intent(['ArrowUp','PageUp','Home'].includes(e.key) || (e.key === ' ' && e.shiftKey));
+  });
+  on('pointerdown', e => {
+    if (el && e.target === el) { drag = e.pointerId; dragging = e.offsetX >= el.clientWidth; lastTop = el.scrollTop; }
+  });
+  on('pointermove', e => { if (drag === e.pointerId) dragging = true; });
+  const release = e => { if (drag === e.pointerId) drag = null; };
+  on('pointerup', release); on('pointercancel', release);
+  on('scroll', e => {
+    if (e.target !== el) return;
+    if (drag !== null && dragging && el.scrollTop !== lastTop) { pinned = el.scrollTop > lastTop && gap() <= 80; lastTop = el.scrollTop; }
+    else if (performance.now() < downUntil && gap() <= 80) pinned = true;
+    schedule();
+  });
+  on('scrollend', e => { if (e.target === el) downUntil = 0; });
+  on('visibilitychange', schedule); sync();
+})();</script><script id="cmux-chat-blocks">(() => {
+  let pending = false;
+  function schedule() {
+    if (pending) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      for (const block of document.querySelectorAll('.markdown-code')) {
+        if (block.dataset.kind === 'ui') continue;
+        const kind = block.querySelector('.code-lang')?.textContent.trim() === 'text' ? 'quote' : 'code';
+        if (block.dataset.kind !== kind) block.dataset.kind = kind;
+      }
+    });
+  }
+  if (typeof MutationObserver === 'function')
+    new MutationObserver(schedule).observe(document, {childList:true, subtree:true, characterData:true});
+  schedule();
+})();</script><script id="cmux-chat-ui">(() => {
+  const cache = new WeakMap();
+  const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  const string = value => typeof value === 'string';
+  const pairs = rows => Array.isArray(rows) ? rows.filter(row => Array.isArray(row) && row.length === 2 && row.every(string)) : [];
+
+  function el(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
+
+  function inline(tag, text, cls) {
+    const node = el(tag, cls);
+    let start = 0;
+    for (const match of text.matchAll(/`([^`\n]+)`|\*\*([^*\n]+)\*\*/g)) {
+      node.append(text.slice(start, match.index), match[1] === undefined ? el('strong', '', match[2]) : el('code', '', match[1]));
+      start = match.index + match[0].length;
+    }
+    node.append(text.slice(start));
+    return node;
+  }
+
+  function copyButton(text, label) {
+    const button = el('button', 'cc-copy', 'Copy');
+    button.type = 'button';
+    button.setAttribute('aria-label', label);
+    button.addEventListener('click', async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        button.textContent = 'Copied';
+      } catch {
+        button.textContent = 'Copy failed';
+      }
+      setTimeout(() => { button.textContent = 'Copy'; }, 1500);
+    });
+    return button;
+  }
+
+  function link(value) {
+    if (!object(value) || !string(value.text)) return;
+    try {
+      const url = new URL(value.href);
+      if (string(value.href) && ['http:', 'https:'].includes(url.protocol)) {
+        const anchor = inline('a', value.text, 'cc-link');
+        anchor.href = url.href;
+        anchor.target = '_blank';
+        anchor.rel = 'noopener noreferrer';
+        return anchor;
+      }
+    } catch {}
+    return inline('span', value.text);
+  }
+
+  function steps(value) {
+    const section = el('section', 'cc-steps'), head = el('div', 'cc-head');
+    if (string(value.title)) head.append(inline('h3', value.title));
+    const action = link(value.link);
+    if (action) head.append(action);
+    if (head.childElementCount) section.append(head);
+    const list = el('ol');
+    for (const item of value.items) {
+      const text = string(item) ? item : item?.text;
+      if (!string(text)) continue;
+      const row = el('li');
+      row.append(inline('div', text));
+      if (string(item.copy)) {
+        const box = el('div', 'cc-snippet');
+        box.append(inline('div', item.copy, 'cc-copy-text'), copyButton(item.copy, 'Copy step text'));
+        row.append(box);
+      }
+      for (const [expectation, question] of pairs(item.checks)) {
+        const check = el('div', 'cc-check');
+        check.append(inline('span', expectation, 'cc-tag'), inline('q', question), copyButton(question, 'Copy question'));
+        row.append(check);
+      }
+      list.append(row);
+    }
+    section.append(list);
+    return section;
+  }
+
+  function equal(a, b) {
+    if (a === b) return true;
+    if (Array.isArray(a)) return Array.isArray(b) && a.length === b.length && a.every((v, i) => equal(v, b[i]));
+    if (!object(a) || !object(b)) return false;
+    const keys = Object.keys(a);
+    return keys.length === Object.keys(b).length && keys.every(k => Object.hasOwn(b, k) && equal(a[k], b[k]));
+  }
+
+  function compare({ left, right, a, b }) {
+    const table = el('table', 'cc-compare'), header = el('tr');
+    header.append(el('th'), inline('th', string(left) ? left : 'before'), inline('th', string(right) ? right : 'after'));
+    const head = el('thead'), body = el('tbody');
+    head.append(header);
+    for (const key of new Set([...Object.keys(a), ...Object.keys(b)])) {
+      const changed = !(Object.hasOwn(a, key) && Object.hasOwn(b, key) && equal(a[key], b[key]));
+      const row = el('tr', changed ? 'cc-changed' : 'cc-equal');
+      const name = el('td');
+      name.append(inline('span', key, 'cc-key'));
+      row.append(name);
+      for (const [side, sign] of [[a, '-'], [b, '+']]) {
+        const cell = el('td');
+        if (changed) cell.append(el('span', 'cc-sign', sign + ' '));
+        cell.append(Object.hasOwn(side, key) ? el('samp', '', JSON.stringify(side[key])) : el('span', 'cc-missing', '(none)'));
+        row.append(cell);
+      }
+      body.append(row);
+    }
+    table.append(head, body);
+    return table;
+  }
+
+  function part(value) {
+    if (!object(value)) return;
+    if (string(value.card)) {
+      const icons = { fail: '×', ok: '✓', warn: '!', info: 'i' };
+      const status = string(value.status) && Object.hasOwn(icons, value.status) ? value.status : 'info';
+      const card = el('section', 'cc-card cc-' + status), icon = el('span', 'cc-icon', icons[status]);
+      icon.setAttribute('role', 'img');
+      icon.setAttribute('aria-label', status);
+      card.append(icon, inline('h3', value.card));
+      if (string(value.sub)) card.append(inline('div', value.sub, 'cc-sub'));
+      return card;
+    }
+    if (Array.isArray(value.story)) {
+      const story = el('dl', 'cc-story');
+      for (const [label, text] of pairs(value.story)) story.append(inline('dt', label), inline('dd', text));
+      return story.childElementCount ? story : undefined;
+    }
+    if (object(value.compare?.a) && object(value.compare?.b)) return compare(value.compare);
+    if (string(value.note)) {
+      const note = el('aside', 'cc-note');
+      if (string(value.label)) note.append(inline('b', value.label, 'cc-label'));
+      note.append(inline('div', value.note));
+      return note;
+    }
+    if (Array.isArray(value.steps?.items)) return steps(value.steps);
+  }
+
+  function sync(block) {
+    const lang = block.querySelector('.code-lang')?.textContent.trim().toLowerCase();
+    const source = lang === 'json' ? block.querySelector('pre code')?.textContent : undefined;
+    let saved = cache.get(block);
+    if (!saved || saved.source !== source) {
+      saved?.view?.remove();
+      saved = { source };
+      cache.set(block, saved);
+      if (source) {
+        try {
+          const data = JSON.parse(source);
+          if (Array.isArray(data?.ui)) {
+            const view = el('div', 'cc-ui');
+            for (const value of data.ui) {
+              const node = part(value);
+              if (node) view.append(node);
+            }
+            if (view.childElementCount) saved.view = view;
+          }
+        } catch {} // The next chunk can complete a JSON fence.
+      }
+    }
+    if (saved.view) {
+      if (saved.view.parentNode !== block) block.append(saved.view);
+      if (block.dataset.kind !== 'ui') block.dataset.kind = 'ui';
+    } else if (block.dataset.kind === 'ui') block.dataset.kind = lang === 'text' ? 'quote' : 'code';
+  }
+
+  const dirty = new Set();
+  let pending = false;
+  function collect(node) {
+    if (node.matches?.('.markdown-code')) dirty.add(node);
+    for (const block of node.querySelectorAll?.('.markdown-code') || []) dirty.add(block);
+  }
+  function schedule() {
+    if (pending || !dirty.size) return;
+    pending = true;
+    requestAnimationFrame(() => {
+      pending = false;
+      for (const block of dirty) if (block.isConnected) sync(block);
+      dirty.clear();
+    });
+  }
+  if (typeof MutationObserver === 'function') new MutationObserver(records => {
+    for (const record of records) {
+      const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+      if (target?.closest('.cc-ui')) continue;
+      const block = target?.closest('.markdown-code');
+      if (block) {
+        if (record.addedNodes.length === 1 && record.addedNodes[0] === cache.get(block)?.view && !record.removedNodes.length) continue;
+        dirty.add(block);
+      } else for (const node of record.addedNodes) collect(node);
+    }
+    schedule();
+  }).observe(document, { subtree: true, childList: true, characterData: true });
+  collect(document);
+  schedule();
+})();
+</script><style id="cmux-chat-ui-style">.markdown-code[data-kind="ui"] {
+  --cc-line: var(--border, #373e50);
+  --cc-muted: var(--text-dim, #a0a7b9);
+  --cc-surface: var(--bg-raised, #404040);
+  position: relative;
+  max-width: 100%;
+  box-sizing: border-box;
+  padding: 0;
+  border: 1px solid var(--cc-line);
+  border-radius: 8px;
+  background: var(--cc-surface);
+  color: var(--text, #ecedf2);
+}
+.markdown-code[data-kind="ui"] > pre,
+.markdown-code[data-kind="ui"] > div:not(.cc-ui) > pre { display: none }
+.markdown-code[data-kind="ui"] > .code-header { display: contents }
+.markdown-code[data-kind="ui"] > .code-header > :not(.code-copy) { display: none }
+.cc-ui { display: grid; min-width: 0; overflow-wrap: anywhere; font: normal 0.95rem/1.5 system-ui, sans-serif }
+.cc-ui > * { min-width: 0; margin: 0; padding: 14px 18px }
+.cc-ui > * + * { border-top: 1px solid var(--cc-line) }
+.cc-ui h3 { margin: 0; font: 650 1.08em/1.35 system-ui, sans-serif }
+.cc-ui .cc-card { --accent: #91a1cf; display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; padding-right: 48px }
+.cc-ui .cc-fail { --accent: #ff6b80 }
+.cc-ui .cc-ok { --accent: #50fa7b }
+.cc-ui .cc-warn { --accent: #ffb86c }
+.cc-card h3 { font-size: 1.2em }
+.cc-icon { display: grid; place-items: center; width: 1.35em; height: 1.35em; border: 1px solid; border-radius: 50%; color: var(--accent); font-weight: bold }
+.cc-sub { grid-column: 2; color: var(--cc-muted) }
+.cc-story { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 0 20px }
+.cc-story dt, .cc-label, .cc-key, .cc-compare th { font-size: .78em; font-weight: 650; letter-spacing: .055em; color: var(--cc-muted) }
+.cc-story dt, .cc-label { text-transform: uppercase }
+.cc-story dt { position: relative; border-left: 1px solid var(--cc-line); padding-left: 12px }
+.cc-story dt::before { content: ''; position: absolute; left: -3px; top: .55em; width: 5px; height: 5px; border-radius: 50%; background: #8797c4 }
+.cc-story dd { margin: 0 }
+.cc-story dd:not(:last-child) { padding-bottom: 10px }
+.cc-ui .cc-compare { width: 100%; table-layout: auto; border-spacing: 0; text-align: left }
+.cc-compare :is(td, th) { padding: 5px 9px; vertical-align: top; text-align: left }
+.cc-compare td:first-child { width: 1%; white-space: nowrap; padding-top: 7px }
+.cc-equal, .cc-missing { color: var(--cc-muted) }
+.cc-changed td:nth-child(2) { background: #ff6b8010; color: #ffa3ae }
+.cc-changed td:last-child { background: #50fa7b10; color: #8be5a0 }
+.cc-sign { font-weight: bold }
+.cc-note { box-shadow: inset 3px 0 #6272a4; background: #6272a410 }
+.cc-head, .cc-snippet { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; flex-wrap: wrap }
+.cc-ui :is(.cc-link, .cc-copy) { padding: 3px 9px; border: 1px solid var(--cc-line); border-radius: 6px; background: transparent; color: inherit; font: 550 .83em/1.45 system-ui, sans-serif; cursor: pointer }
+.cc-ui :is(.cc-link, .cc-copy):hover { border-color: var(--cc-muted) }
+.cc-ui ol { list-style: none; margin: 0; padding: 0; counter-reset: item }
+.cc-head + ol { margin-top: 12px }
+.cc-ui ol > li { position: relative; margin: 0; padding-left: 2em; counter-increment: item }
+.cc-ui li + li { margin-top: 14px }
+.cc-ui li::before { content: counter(item); position: absolute; left: 0; top: .1em; width: 1.55em; height: 1.55em; text-align: center; border: 1px solid var(--cc-line); border-radius: 50%; color: var(--cc-muted); font-size: .82em }
+.cc-snippet, .cc-check { margin-top: 7px; padding: 8px 10px; border: 1px solid var(--cc-line); border-radius: 8px }
+.cc-copy-text { flex: 1 1 12em; min-width: 0; max-height: 5.9em; overflow: auto; white-space: pre-wrap }
+.cc-check { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; align-items: start }
+.cc-tag { justify-self: start; border-radius: 4px; background: #6272a42a; padding: 1px 6px; font-size: .82em }
+.cc-check q { grid-column: 1 }
+.cc-check button { grid-column: 2; grid-row: 2 }
+</style><script id="cmux-chat-look">(() => {
+  const answer = '.msg.assistant > .body.selectable';
+  const saved = new WeakMap();
+  const dirty = new Set();
+  const turns = new Set();
+  let timer;
+
+  function element(tag, cls) {
+    const node = document.createElement(tag);
+    node.className = cls;
+    return node;
+  }
+
+  // The color of a label chip: what went wrong, what should happen, what to do next.
+  function toneOf(text) {
+    const t = text.toLowerCase().replace(/[^a-z ]/g, '').trim();
+    if (/^(did|got|owner got|actual|error|problem|failed|failure|wrong|broken|before)$/.test(t)) return 'bad';
+    if (/^(expected|should|fix|fixed|result|works|after|now)$/.test(t)) return 'good';
+    if (/^(try|next|todo|to do|action|test|run|lab|do)$/.test(t)) return 'next';
+  }
+
+  function labelOf(line) {
+    const first = line.find(node => node.nodeType === 1 || node.textContent.trim());
+    const text = first?.textContent.trim();
+    if (first?.localName === 'strong' && text && text.length <= 24 && text.split(/\s+/).length <= 3) return first;
+  }
+
+  function paragraphs(view, firstBody) {
+    const first = firstBody && view.querySelector('p');
+    for (const p of view.querySelectorAll('p')) {
+      const lines = [[]];
+      for (const node of p.childNodes) {
+        if (node.localName === 'br') lines.push([]);
+        else lines.at(-1).push(node);
+      }
+      const lead = first === p && !labelOf(lines[0]) && p.textContent.trim().length <= 220;
+      if (!lines.some(labelOf)) {
+        if (lead) p.classList.add('cc-lead');
+        continue;
+      }
+
+      let grid = p.previousElementSibling;
+      if (!grid?.classList.contains('cc-grid')) grid = null;
+      let plain;
+      for (const [index, line] of lines.entries()) {
+        const label = labelOf(line);
+        if (!label) {
+          grid = null;
+          if (!plain) {
+            plain = element('p', lead && !index ? 'cc-lead' : '');
+            p.before(plain);
+          } else plain.append(document.createElement('br'));
+          plain.append(...line);
+          continue;
+        }
+        plain = null;
+        const value = line.slice(line.indexOf(label) + 1);
+        if (value[0]?.nodeType === 3) value[0].data = value[0].data.replace(/^\s*(?:[·:]\s*|-\s+)/, '');
+        if (lines.length === 1 && !value.some(n => n.nodeType === 1 || n.textContent.trim())) {
+          const section = element('div', 'cc-section');
+          section.append(label);
+          p.before(section);
+          break;
+        }
+        if (!grid) {
+          grid = element('dl', 'cc-grid');
+          p.before(grid);
+        }
+        const term = document.createElement('dt'), detail = document.createElement('dd');
+        term.append(label);
+        const tone = toneOf(label.textContent);
+        if (tone) term.dataset.tone = tone;
+        detail.append(...value);
+        grid.append(term, detail);
+      }
+      p.remove();
+    }
+  }
+
+  function build(body, first) {
+    const view = element('div', 'cc-view selectable');
+    for (const node of body.childNodes) view.append(node.cloneNode(true));
+    for (const ui of view.querySelectorAll('.cc-ui')) ui.remove();
+    paragraphs(view, first);
+    for (const code of view.querySelectorAll('code')) {
+      if (code.closest('pre')) continue;
+      const path = code.textContent;
+      const segments = path.split('/');
+      if (path.startsWith('/')) segments.shift();
+      else if (segments.length < 3) continue;
+      if (!segments.every(part => part && part === part.trim() && /^[\p{L}\p{M}\p{N}_.@~+ -]+(?::\d+(?::\d+)?)?$/u.test(part))) continue;
+      code.title = path;
+      code.dataset.short = path.slice(path.lastIndexOf('/') + 1);
+    }
+    for (const button of view.querySelectorAll('.code-copy')) {
+      const code = button.closest('.markdown-code')?.querySelector('pre code');
+      if (code) button.addEventListener('click', () => navigator.clipboard.writeText(code.textContent).catch(() => {}));
+    }
+    return view;
+  }
+
+  function clear(msg) {
+    const old = saved.get(msg);
+    if (!old) return;
+    saved.delete(msg);
+    old.body.removeAttribute('data-cc-source');
+    old.view.remove();
+  }
+
+  function sync(msg, body, first) {
+    const old = saved.get(msg);
+    if (!body) return clear(msg);
+    try {
+      if (old?.body === body && old.first === first && !dirty.has(body)) {
+        if (old.view !== msg.lastChild) msg.append(old.view);
+        return;
+      }
+      // Keep resource-loading content in its original node.
+      if (body.querySelector('img,iframe,video,audio,object,embed,source,link')) return clear(msg);
+      const view = build(body, first);
+      clear(msg);
+      msg.append(view);
+      saved.set(msg, { body, view, first });
+      body.setAttribute('data-cc-source', '');
+    } catch {
+      clear(msg);
+      body.removeAttribute('data-cc-source');
+    }
+  }
+
+  function flush() {
+    timer = undefined;
+    for (const turn of turns) {
+      if (!turn.isConnected) continue;
+      let first = true;
+      for (const msg of turn.querySelectorAll('.msg.assistant')) {
+        const body = [...msg.children].find(node => node.matches('.body.selectable') && !node.querySelector('.turn-activity'));
+        sync(msg, body, first);
+        if (body) first = false;
+      }
+    }
+    turns.clear();
+    dirty.clear();
+  }
+
+  function collect(node) {
+    if (node.matches?.('.turn-group')) turns.add(node);
+    for (const turn of node.querySelectorAll?.('.turn-group') || []) turns.add(turn);
+  }
+
+  function schedule() {
+    if (turns.size && timer === undefined) timer = setTimeout(flush, 250);
+  }
+
+  new MutationObserver(records => {
+    for (const record of records) {
+      const target = record.target.nodeType === 1 ? record.target : record.target.parentElement;
+      if (target?.closest('.cc-view,.cc-ui')) continue;
+      if (target?.closest('.turn-activity') && record.attributeName !== 'class') continue;
+      const turn = target?.closest('.turn-group');
+      if (!turn) {
+        for (const node of record.addedNodes) collect(node);
+        continue;
+      }
+      const body = target.closest(answer);
+      if (body) {
+        if (record.attributeName === 'data-cc-source' || record.attributeName === 'data-kind') continue;
+        const changed = [...record.addedNodes, ...record.removedNodes];
+        if (changed.length && changed.every(n => n.matches?.('.cc-ui'))) continue;
+        dirty.add(body);
+      } else {
+        if (record.type !== 'childList' && record.attributeName !== 'class') continue;
+        const changed = [...record.addedNodes, ...record.removedNodes];
+        if (changed.length && changed.every(n => n.matches?.('.cc-view')) &&
+            (!saved.has(target) || saved.get(target).view === target.lastChild)) continue;
+      }
+      turns.add(turn);
+    }
+    schedule();
+  }).observe(document, { childList: true, characterData: true, attributes: true, subtree: true });
+  collect(document);
+  schedule();
+})();
+</script><style id="cmux-chat-look-style">:root {
+  --bg: color-mix(in srgb, #f8f8f2 9%, #212121) !important;
+  --bg-html: var(--bg) !important;
+  --bg-body: var(--bg) !important;
+  --bg-code: #292929;
+  --bg-raised: #404040;
+}
+.turn-virtual-row + .turn-virtual-row,
+.turn-list[data-virtualized] > :first-child:not([style="height: 0px;"]) + .turn-virtual-row {
+  padding-top: 30px;
+}
+/* Your message: a terminal input in a bubble on the right. Sunken, monospace, an orange prompt sign. */
+.msg.user > .body {
+  position: relative; margin-left: auto; width: fit-content; max-width: min(72%, 820px);
+  background: #2a2a2a; border: 1px solid #1f1f1f; border-radius: 10px;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, .35);
+  padding: 10px 14px 10px 32px; color: #f2f2ee;
+  font: .88rem/1.55 var(--font-mono);
+}
+.msg.user > .body::before {
+  content: "\203A"; position: absolute; left: 13px; top: 7px;
+  color: #d97757; font: 700 1.1rem/1.4 var(--font-mono);
+}
+.turn-activity > .turn-summary {
+  width: fit-content !important; max-width: 100%; min-height: 22px !important; padding: 2px 9px !important;
+  border-radius: 20px !important; background: var(--bg-raised) !important; color: var(--text-dim) !important;
+  font-size: .78rem !important; white-space: nowrap;
+}
+.msg.assistant > [data-cc-source]:has(~ .cc-view) { display: none }
+.cc-view { min-width: 0; line-height: 1.65; overflow-wrap: anywhere; user-select: text }
+.cc-view > :first-child { margin-top: 0 }
+.cc-view > :last-child { margin-bottom: 0 }
+.cc-view p { margin: 0 0 .85em }
+.cc-lead { font-size: 1.02em; font-weight: 600; color: #fafaf6 }
+/* Label rows: the label is a small chip. Its color says what kind of line it is (data-tone from look.js). */
+.cc-grid { display: grid; grid-template-columns: fit-content(10em) minmax(0, 1fr); gap: .5em .75em; margin: .6em 0 1em; align-items: baseline }
+.cc-grid dt {
+  justify-self: start; padding: 1px 8px; border-radius: 999px;
+  font: 600 .75rem/1.55 var(--font-sans); background: rgba(139, 156, 255, .14); color: #c3cbff;
+}
+.cc-grid dt[data-tone="bad"] { background: rgba(255, 107, 128, .16); color: #ffb1bd }
+.cc-grid dt[data-tone="good"] { background: rgba(80, 250, 123, .12); color: #a6f0b9 }
+.cc-grid dt[data-tone="next"] { background: rgba(255, 184, 108, .14); color: #ffd2a3 }
+.cc-grid dd { margin: 0 }
+.cc-section, .cc-view :is(h1,h2,h3):not(.cc-ui *) {
+  margin: 1.2em 0 .35em; font: 650 .82rem/1.5 var(--font-sans); color: #fafaf6;
+  font-style: normal; text-decoration: none;
+}
+.cc-view :is(h1,h2):not(.cc-ui *) { font-size: .95rem }
+.cc-section + * { margin-top: 0 }
+.cc-view ol:not(.cc-ui *) { list-style: none; padding-inline-start: 2.2em }
+.cc-view ol:not(.cc-ui *) > li { position: relative; margin: .55em 0 }
+.cc-view ol:not(.cc-ui *) > li::before {
+  content: counter(list-item); position: absolute; inset: .18em auto auto -2.5em;
+  min-width: 1.65em; line-height: 1.65; text-align: center; font-size: .78em;
+  border-radius: 50%; background: #6272a4; color: #fff;
+}
+.cc-view a { color: var(--accent) }
+.cc-view :not(pre) > code { color: #c4cafa; font: .9em var(--font-mono); background: rgba(0, 0, 0, .22); padding: 1px 6px; border-radius: 5px }
+.cc-view :not(pre) > code[data-short] { font-size: 0 }
+.cc-view code[data-short]::before { content: attr(data-short); font-size: .9rem }
+/* Quotes: soft boxes, no bar. */
+.cc-view blockquote { margin-inline: 0; padding: 10px 14px; color: var(--text); background: rgba(0, 0, 0, .16); border: 0; border-radius: 8px }
+.msg .markdown-code[data-kind="quote"] { border-left: 0; background: rgba(0, 0, 0, .16); border-radius: 8px; padding: 10px 14px }
+.markdown-table-wrap tr:nth-child(even) td { background: var(--bg-raised) }
+</style><style>:root{--font-size-base:16px!important;--font-size-code:14px!important}:is(.connection-notice,.msg,.agent-messages-queued,details.thinking,.activity-indicator,.tool,.turn-activity,.turn-live-activity,.turn-actions,.error-block-wrap,.status-line,.plan-block,.files-changed){max-width:none!important;padding-left:16px;padding-right:16px}.msg .body :not(pre)>code{color:#b1b9f9;background:none;padding:0}.msg .body :is(h1,h2,h3,h4,h5,h6){font-weight:700}.msg .body h1{font-style:italic;text-decoration:underline}.msg .body blockquote{font-style:italic}.msg .body a{text-decoration:underline}.msg .body .markdown-table-wrap th{font-weight:700;color:var(--text)}.tool .name{font-weight:700;color:var(--text)}.tool-dot.ok{background:#4eba65}.tool-dot.fail{background:#ff6b80}.markdown-code{--shiki-token-keyword:#f92672;--shiki-token-function:#a6e22e;--shiki-token-string:#e6db74;--shiki-token-string-expression:#e6db74;--shiki-token-constant:#be84ff;--shiki-token-parameter:#fd971f;--shiki-token-comment:#75715e;--shiki-token-punctuation:#f8f8f2}
+.markdown-code{position:relative;margin:4px 0 12px;border:1px solid var(--border);border-radius:6px;padding:8px 12px}
+p:has(+ .markdown-code){margin-bottom:4px}
+.markdown-code .code-header{display:contents}
+.markdown-code .code-lang{display:none}
+.markdown-code .code-copy{position:absolute;top:2px;right:2px;z-index:1;opacity:0}
+.markdown-code:hover .code-copy,.markdown-code .code-copy:focus-visible{opacity:1}
+:is(.msg .body .markdown-code,.markdown-code) pre{margin:0;padding:0;white-space:pre-wrap;overflow-wrap:anywhere;overflow-x:visible}
+:is(.msg .body .markdown-code,.markdown-code) pre code{display:block;white-space:inherit;overflow-wrap:inherit}
+.markdown-code[data-kind="quote"]{background:none;border:0;border-left:3px solid #6272a4;border-radius:0;padding:2px 0 2px 12px}
+:is(.msg .body .markdown-code,.markdown-code)[data-kind="quote"] :is(pre,pre code,pre span){font:inherit;color:inherit!important;background:none!important}
+#chat-card{display:none!important}</style></head><body><main id="messages"><div class="turn-list"><div class="turn-virtual-row"><div class="turn-group">
+<div class="msg user"><div class="body selectable">Why did the query fail?</div></div>
+<div class="msg assistant"><div class="body selectable"><div class="turn-activity"><button class="turn-summary" aria-expanded="false">Read 1 file, ran 1 command</button><div hidden>Read the query settings.</div></div></div></div><div class="msg assistant"><div class="body selectable">
+<p>The query used a sort option that only works with one dimension.</p>
+<p><strong>Saw</strong> Results sorted by count.<br><strong>Did</strong>: <code>{"by":["weekday","hour"]}</code> → rejected<br><strong>Expected</strong> - Results grouped by weekday.<br><strong>Try</strong> · Remove the sort option.</p>
+<p><strong>Lab</strong> · <a target="_blank" rel="noopener noreferrer" href="https://example.test/lab">Open the query</a></p>
+<p><strong>Where</strong></p><p>Change <code>/workspace/server/attendance/query.ts:48</code>.</p>
+<ol><li>Run the original question.</li><li>Compare the weekday totals.</li></ol>
+<div class="markdown-code"><div class="code-header"><span class="code-lang">json</span><button class="code-copy">Copy</button></div><pre><code>{"by":["weekday","hour"]}</code></pre></div>
+</div></div></div></div>
+<div class="turn-virtual-row"><div class="turn-group">
+<div class="msg user"><div class="body selectable">Show the comparison.</div></div>
+<div class="msg assistant"><div class="body selectable">
+<p>Here is the same query before and after the change.</p>
+<div class="markdown-code selectable"><div class="code-header"><span class="code-lang">json</span><button type="button" class="code-copy" aria-label="Copy code">Copy</button></div><div><pre class="shiki"><code>{"ui": [
+  {"card": "Agent sent an option the backend rejects", "status": "fail", "sub": "The owner got the table sorted by count, not by weekday"},
+  {"story": [["Owner", "For this year, how many check-ins for each weekday and hour?"], ["Agent", "attendance.query → rejected → retry without `order` → answered"]]},
+  {"compare": {"left": "sent", "right": "should send", "a": {"by": ["weekday","hour"], "order": "fixed"}, "b": {"by": ["weekday","hour"]}}},
+  {"note": "The `order` text never says that **fixed** works for one dimension only.", "label": "Why"},
+  {"steps": {"title": "Try in Agent Lab", "link": {"text": "Open in Agent Lab", "href": "https://example.test/lab?x=1"}, "items": [
+    "Click **Run** once as it is, for a baseline. The error comes and goes.",
+    {"text": "Domain actions › attendance.query › Edit parameter wording › `order`: paste, then **Save**", "copy": "count: largest first. fixed: ... for one dimension only."},
+    {"text": "Run both questions", "checks": [["no `order`", "For this year, how many check-ins for each weekday and hour?"], ["still `order: \"fixed\"`", "Check-ins by time of day over the last 12 months, morning first."]]}
+  ]}}
+]}</code></pre></div></div>
+</div></div></div></div></div></main>
+<script>
+const summary = document.querySelector('.turn-summary');
+summary.onclick = () => {
+  summary.nextElementSibling.hidden = !summary.nextElementSibling.hidden;
+  summary.setAttribute('aria-expanded', String(!summary.nextElementSibling.hidden));
+};
+for (const button of document.querySelectorAll('.code-copy'))
+  button.onclick = () => navigator.clipboard.writeText(button.closest('.markdown-code').querySelector('pre code').textContent);
+</script></body></html>

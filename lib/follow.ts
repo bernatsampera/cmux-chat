@@ -221,18 +221,18 @@ const CODEX = icon("#10a37f", 1.2, "M8 1.8l4.9 2.8v5.7L8 13.2l-4.9-2.9V4.6L8 1.8
 // color-scheme: a frame with another scheme than its page gets a white canvas.
 // --bar is the height of the strip at the top, --foot of the state line at the bottom.
 export const PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Chat</title><style>
-:root{color-scheme:dark;background:#1d1d1d;--bar:0px;--foot:0px}:root:has(#bar.tabs){--bar:32px}:root:has(#state:not(:empty)){--foot:28px}body{margin:0;background:#1d1d1d;color:#999;font:14px -apple-system,sans-serif}
-iframe{position:fixed;inset:var(--bar) 0 var(--foot);width:100%;height:calc(100% - var(--bar) - var(--foot));border:0;visibility:hidden;color-scheme:light}iframe.on{visibility:visible}#note{padding:calc(32px + var(--bar)) 32px 32px}
-#bar{position:fixed;inset:0 0 auto;height:var(--bar);box-sizing:border-box;overflow:hidden;display:flex;align-items:stretch;background:#212121;font-size:13px;cursor:default;-webkit-user-select:none}#bar.tabs{border-bottom:1px solid #6272a4}
+:root{color-scheme:dark;--page:color-mix(in srgb, #f8f8f2 9%, #212121);background:var(--page);--bar:0px;--foot:0px}:root:has(#bar.tabs){--bar:32px}:root:has(#state:not(:empty)){--foot:28px}body{margin:0;background:var(--page);color:#999;font:14px -apple-system,sans-serif}
+iframe{position:fixed;inset:var(--bar) 0 var(--foot);width:100%;height:calc(100% - var(--bar) - var(--foot));border:0;visibility:hidden;color-scheme:light;background:var(--page)}iframe.on{visibility:visible}#note{padding:calc(32px + var(--bar)) 32px 32px}
+#bar{position:fixed;inset:0 0 auto;height:var(--bar);box-sizing:border-box;overflow:hidden;display:flex;align-items:stretch;background:#292929;font-size:13px;cursor:default;-webkit-user-select:none}#bar.tabs{border-bottom:1px solid #6272a4}
 #tabs{display:flex;min-width:0;overflow-x:auto;scrollbar-width:none}#tabs::-webkit-scrollbar{display:none}
-.tab{display:flex;align-items:center;gap:7px;flex:0 1 auto;min-width:110px;max-width:340px;box-sizing:border-box;padding:0 12px;border-right:1px solid #1d1d1d}.tab:hover,#plus:hover{background:#2a2a2a}.tab.me{background:#1d1d1d;color:#f8f8f2;box-shadow:inset 0 2px #6272a4}
+.tab{display:flex;align-items:center;gap:7px;flex:0 1 auto;min-width:110px;max-width:340px;box-sizing:border-box;padding:0 12px;border-right:1px solid #1d1d1d}.tab:hover,#plus:hover{background:#2a2a2a}.tab.me{background:var(--page);color:#f8f8f2;box-shadow:inset 0 2px #6272a4}
 .tab i{flex:none;width:14px;height:14px}.tab.claude i{background:${CLAUDE}}.tab.codex i{background:${CODEX}}.tab span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .tab b{flex:none;display:none;width:8px;height:8px;border-radius:50%}.tab:is(.busy,.ask,.new) b{display:block}.tab.busy b{background:#ffb86c;animation:beat 1.2s infinite}.tab.new b{background:#50fa7b}.tab.new span{font-weight:700;color:#f8f8f2}.tab.read:not(.me) span{opacity:.6}
 .tab.ask b{width:auto;height:auto;color:#ff79c6}.tab.ask b::before{content:"?"}
 #rename{position:fixed;z-index:1;background:#292929;color:#eee;border:1px solid #666;border-radius:4px;padding:5px 12px}
 .tab input{min-width:0;width:100%;font:inherit;color:inherit;background:#212121;border:1px solid #6272a4}
 #plus{flex:none;display:none;align-items:center;padding:0 12px;font-size:17px}#bar.plus #plus{display:flex}
-#state{position:fixed;inset:auto 0 0;height:var(--foot);line-height:28px;padding:0 16px;background:#212121;font-size:13px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
+#state{position:fixed;inset:auto 0 0;height:var(--foot);line-height:28px;padding:0 16px;background:var(--page);font-size:13px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 #state.busy{color:#ffb86c}#state.done{color:#50fa7b}#state.ask{color:#ff79c6}#state.busy::before{content:"\\25CF  ";animation:beat 1.2s infinite}@keyframes beat{50%{opacity:.15}}
 </style></head><body><div id="bar"><div id="tabs"></div><div id="plus" title="New Claude chat">+</div></div><div id="note"></div><div id="state"></div><button id="rename" hidden>Rename</button><script>
 const frames = new Map(), loaded = new Set(), note = document.getElementById("note");

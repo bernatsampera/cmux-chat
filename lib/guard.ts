@@ -4,6 +4,7 @@
 // commands that are not installed. It also adds the follow page and makes the
 // server read-only: nothing can send text or an interrupt to a terminal.
 import { basename } from "node:path";
+import { readFileSync } from "node:fs";
 import { UUID, signLink } from "./common";
 import { PAGE, followSurface, pickChat, renameChat } from "./follow";
 import { liveJoin, liveServer } from "./live";
@@ -111,6 +112,7 @@ const BLOCKS = `<script id="cmux-chat-blocks">(() => {
     requestAnimationFrame(() => {
       pending = false;
       for (const block of document.querySelectorAll('.markdown-code')) {
+        if (block.dataset.kind === 'ui') continue;
         const kind = block.querySelector('.code-lang')?.textContent.trim() === 'text' ? 'quote' : 'code';
         if (block.dataset.kind !== kind) block.dataset.kind = kind;
       }
@@ -181,12 +183,18 @@ const STICK = `<script id="cmux-chat-stick">(() => {
   on('visibilitychange', schedule); sync();
 })();</script>`;
 
+const UI = '<script id="cmux-chat-ui">' + readFileSync(new URL("./page/ui.js", import.meta.url), "utf8") + '</script>';
+const UI_STYLE = '<style id="cmux-chat-ui-style">' + readFileSync(new URL("./page/ui.css", import.meta.url), "utf8") + '</style>';
+
+const LOOK = '<script id="cmux-chat-look">' + readFileSync(new URL("./page/look.js", import.meta.url), "utf8") + '</script>';
+const LOOK_STYLE = '<style id="cmux-chat-look-style">' + readFileSync(new URL("./page/look.css", import.meta.url), "utf8") + '</style>';
+
 // No input box, and no request to another host, for example an image in a reply.
 async function harden(res: Response | undefined, host: string, sidecar = false) {
   if (!res?.headers.get("content-type")?.startsWith("text/html")) return res;
   const headers = new Headers(res.headers);
   headers.set("content-security-policy", `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws://${host}; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'self'`);
-  const text = (await res.text()).replace("</head>", `${sidecar ? STICK + BLOCKS : ""}<style>:root{--font-size-base:16px!important;--font-size-code:14px!important}:is(${WIDE}){max-width:none!important;padding-left:16px;padding-right:16px}${TERMINAL}${sidecar ? BLOCK_STYLE : ""}#chat-card{display:none!important}</style></head>`);
+  const text = (await res.text()).replace("</head>", () => `${sidecar ? STICK + BLOCKS + UI + UI_STYLE + LOOK + LOOK_STYLE : ""}<style>:root{--font-size-base:16px!important;--font-size-code:14px!important}:is(${WIDE}){max-width:none!important;padding-left:16px;padding-right:16px}${TERMINAL}${sidecar ? BLOCK_STYLE : ""}#chat-card{display:none!important}</style></head>`);
   return new Response(text, { status: res.status, headers });
 }
 
