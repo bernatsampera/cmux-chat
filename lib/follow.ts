@@ -1,5 +1,5 @@
 // Show the live session and project tabs for one cmux surface.
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
+import { closeSync, fstatSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { AGENTS, CHATS_FILE, CLAUDE_DIR, CODEX_DIR, PICK_FILE, RENAME_FILE, validTitle, Refusal, SESSION_ID, claudeLive, pidStart, processSurface, ps, readStore, sh, writePrivate, writeStore, type Agent, type Project } from "./common";
@@ -72,8 +72,22 @@ function asked(sessionId: string, pid: number, since: number): boolean {
   }
 }
 
+// Polls share the start time from ps for five seconds. A dead process loses
+// its entry immediately. Each session record still has to match the start time.
+const starts = new Map<number, { start: string; until: number }>();
+function cachedStart(pid: number): string {
+  try { process.kill(pid, 0); }
+  catch { starts.delete(pid); return ""; }
+  const now = Date.now(), cached = starts.get(pid);
+  if (cached && now < cached.until) return cached.start;
+  const start = pidStart(pid);
+  if (starts.size >= 256) starts.delete(starts.keys().next().value!);
+  starts.set(pid, { start, until: now + 5000 });
+  return start;
+}
+
 // The live interactive agents in these panes. The session id is read each time.
-function claims(wanted: Set<string>): Claim[] {
+function claudeClaims(wanted: Set<string>): Claim[] {
   const out: Claim[] = [];
   const dir = join(CLAUDE_DIR, "sessions");
   for (const name of existsSync(dir) ? readdirSync(dir) : []) {
@@ -82,16 +96,21 @@ function claims(wanted: Set<string>): Claim[] {
     if (live?.kind !== "interactive" || typeof live.sessionId !== "string" || !SESSION_ID.test(live.sessionId) || typeof live.procStart !== "string") continue;
     const leaf = leafOf(pid, live.procStart);
     // procStart also shows a dead process, or a reused pid.
-    const start = wanted.has(leaf) ? pidStart(pid) : "";
+    const start = wanted.has(leaf) ? cachedStart(pid) : "";
     if (!start || start.replace(/\s+/g, " ") !== live.procStart.replace(/\s+/g, " ")) continue;
     out.push({ leaf, agent: "claude", sessionId: live.sessionId, pid, start, cwd: live.cwd ?? "/", status: live.status, since: live.statusUpdatedAt });
   }
+  return out;
+}
+
+function codexClaims(wanted: Set<string>): Claim[] {
+  const out: Claim[] = [];
   if (Date.now() - codexAt > 1_500) {
     codexPids = sh("/usr/bin/pgrep", "-ax", "codex").split("\n").map(Number).filter(Boolean);
     codexAt = Date.now();
   }
   for (const pid of codexPids) {
-    const start = pidStart(pid);
+    const start = cachedStart(pid);
     const leaf = start && leafOf(pid, start);
     if (!leaf || !wanted.has(leaf) || ps(pid, "tty") === "??") continue;
     const open = sh("/usr/sbin/lsof", "-nP", "-p", String(pid), "-Ffn");
@@ -102,6 +121,10 @@ function claims(wanted: Set<string>): Claim[] {
     out.push({ ...turn, leaf, agent: "codex", sessionId: path?.match(ROLLOUT)![1] ?? "", pid, start, cwd: open.match(/^fcwd\nn(.*)$/m)?.[1] ?? "/", path });
   }
   return out;
+}
+
+function claims(wanted: Set<string>): Claim[] {
+  return [...claudeClaims(wanted), ...codexClaims(wanted)];
 }
 
 const claudePaths = new Map<string, string>();
@@ -194,21 +217,84 @@ function why(surface: string): string {
 }
 
 // The one session of a terminal.
-function settle(found: Claim[], tabId: string, title: string): State {
+function active(found: Claim[]) {
   const sessions = () => new Set(found.map((c) => c.agent + c.sessionId)).size;
   // A Codex with no rollout is not a session yet. Next to a real one it is often a test
   // that runs fake agents in this terminal.
   if (sessions() > 1) found = found.filter((c) => c.sessionId);
   if (sessions() > 1) {
     found = found.filter((c) => ps(c.pid, "stat").includes("+"));
-    if (sessions() !== 1) return none("More than one agent runs in this terminal.", title);
+    if (sessions() !== 1) return undefined;
   }
-  const [c] = found;
+  return found[0];
+}
+
+function settle(found: Claim[], tabId: string, title: string): State {
+  const c = active(found);
+  if (!c && found.length) return none("More than one agent runs in this terminal.", title);
   if (!c) return none("No Claude Code or Codex session in this terminal.", title);
   const path = c.path ?? (c.agent === "claude" ? claudePath(c.sessionId) : undefined);
   if (!path) return none("The session has no transcript yet. Send a message in the terminal.", title);
   bind(c, tabId, path);
   return { session: c.sessionId, title, message: null, status: c.status, since: c.since };
+}
+
+const questionCache = new Map<string, { stamp: string; open: boolean }>();
+function questionOf(c: Claim): boolean {
+  // The session file can stay idle after a failed write. The transcript records
+  // when the question opens and closes. A busy session is already working.
+  if (c.agent !== "claude" || c.status === "busy") return false;
+  let fd: number | undefined;
+  try {
+    const path = claudePath(c.sessionId);
+    if (!path) return false;
+    fd = openSync(path, "r");
+    const stat = fstatSync(fd, { bigint: true }), stamp = [stat.ino, stat.size, stat.ctimeNs, stat.mtimeNs].join("/");
+    const cached = questionCache.get(path);
+    if (cached?.stamp === stamp) return cached.open;
+    const entry = { stamp, open: false };
+    if (questionCache.size >= 128) questionCache.delete(questionCache.keys().next().value!);
+    questionCache.set(path, entry);
+    const size = Number(stat.size), bytes = Buffer.alloc(Math.min(size, 512 << 10));
+    if (readSync(fd, bytes, 0, bytes.length, size - bytes.length) !== bytes.length) return false;
+    const lines = bytes.toString("utf8").split("\n");
+    if (size > bytes.length) lines.shift();
+    const closed = new Set<string>();
+    for (const line of lines.reverse()) {
+      if (!line.trim()) continue;
+      const row = JSON.parse(line);
+      if (row.sessionId && row.sessionId !== c.sessionId) continue;
+      const content = row.message?.content;
+      if (!Array.isArray(content)) continue;
+      for (const item of content.reverse()) {
+        if (row.type === "user" && item?.type === "tool_result") closed.add(item.tool_use_id);
+        if (row.type !== "assistant" || item?.type !== "tool_use" || item.name !== "AskUserQuestion" || closed.has(item.id)) continue;
+        const questions = item.input?.questions;
+        if (typeof item.id !== "string" || !/^[\w-]{1,128}$/.test(item.id) || !Array.isArray(questions) || !questions.length) return false;
+        if (!questions.every((q: any) => typeof q?.question === "string" && Array.isArray(q.options) && q.options.length &&
+          q.options.every((o: any) => typeof o?.label === "string"))) return false;
+        entry.open = true;
+        return true;
+      }
+    }
+  } catch { /* Wait for a complete transcript line. */ }
+  finally { if (fd !== undefined) closeSync(fd); }
+  return false;
+}
+
+export function waitingQuestions(surfaces: Set<string>, verifyStart = false) {
+  const claude = claudeClaims(surfaces);
+  const questions = new Set(claude.filter(questionOf));
+  const open = new Set([...questions].map(c => c.leaf));
+  if (!open.size) return open;
+  // Check for competing agents only on terminals with an open Claude question.
+  const found = [...claude, ...codexClaims(open)];
+  for (const surface of open) {
+    const agent = active(found.filter(c => c.leaf === surface));
+    // Before moving the divider, check for PID reuse since the last cached poll.
+    if (!agent || !questions.has(agent) || (verifyStart && pidStart(agent.pid) !== agent.start)) open.delete(surface);
+  }
+  return open;
 }
 
 // The shapes of ProviderIcon in agent-chat (src/components/icons.tsx).

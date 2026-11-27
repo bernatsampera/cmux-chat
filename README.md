@@ -51,6 +51,12 @@ Write a fenced `json` block with a top-level `ui` array. The chat draws the part
 
 Card status can be `fail`, `ok`, `warn`, or `info` (the default). Comparison headings default to “before” and “after”. Use backticks for inline code and double asterisks for bold. Links accept HTTP and HTTPS addresses. Hover over the block or focus its copy button to copy the original JSON.
 
+## Terminal size for Claude questions
+
+When Claude Code opens a multiple-choice question, the terminal grows to about 60% of the split it shares with the chat. When the question closes, the helper restores the previous size if the divider is still where it left it. If you move the divider yourself, the helper keeps your size.
+
+Set `ORCA_CHAT_QUESTION_RESIZE=0` in the helper's environment to turn off automatic resizing.
+
 ## Tests and license
 
 Run `./e2e/install.e2e.sh` to repeat the install checks with a fresh temporary home. It downloads dependencies and uses a fake cmux command. Other tests under `e2e/` cover chat, tabs, and sidebar behavior. Some create real cmux workspaces on screen.

@@ -10,15 +10,24 @@ import { spawn } from "node:child_process";
 import { openSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { CHATS_FILE, PICK_FILE, RENAME_FILE, validTitle, STATE_DIR, UUID, ensureStateDir, refuse, run, writePrivate, type Chat, type Project } from "./common";
+import { waitingQuestions } from "./follow";
 
 // The second form is the one-time link, until the page has followed it.
 const PAGE = new RegExp(`^http://127\\.0\\.0\\.1:${Number(process.env.ORCA_CHAT_PORT || 47739)}/(?:[0-9a-f]{64}/follow|cmux-open)\\?cmux=([0-9a-f-]{36})(?:&until=\\d+&sig=[0-9a-f]{64})?$`, "i");
 const SWEEP = 5_000; // names, terminals that are gone, and whether cmux is there
 
 export type Rpc = (method: string, params: object) => Promise<any>;
-export interface Tab { id: string; workspace: string; pane: string; index: number; type: string; title: string; selected: boolean; focused: boolean; name: string; url: boolean; chat?: string }
+export interface Tab { id: string; workspace: string; pane: string; sibling?: string; index: number; type: string; title: string; selected: boolean; focused: boolean; name: string; url: boolean; chat?: string }
 
 const low = (x: unknown) => String(x ?? "").toLowerCase();
+
+function sibling(layout: any, pane: string): string | undefined {
+  if (layout?.children?.length !== 2) return;
+  const [a, b] = layout.children;
+  if (low(a.pane?.id) === pane) return low(b.pane?.id);
+  if (low(b.pane?.id) === pane) return low(a.pane?.id);
+  return sibling(a, pane) || sibling(b, pane);
+}
 
 // The tabs of one workspace, or of all. The URL of a page holds the token: it stays in here.
 export async function readTabs(rpc: Rpc, workspace?: string): Promise<Tab[]> {
@@ -26,7 +35,7 @@ export async function readTabs(rpc: Rpc, workspace?: string): Promise<Tab[]> {
   const list = tree.windows.flatMap((w: any) => w.workspaces).filter((w: any) => !workspace || low(w.id) === low(workspace));
   return list.flatMap((w: any) => w.panes.flatMap((p: any) => p.surfaces.map((s: any) => {
     const chat = s.type === "browser" ? low(PAGE.exec(s.url ?? "")?.[1]) : "";
-    return { id: low(s.id), workspace: low(w.id), pane: low(p.id), index: s.index_in_pane, type: s.type, title: String(s.title ?? ""), selected: s.selected_in_pane === true, focused: s.focused === true, name: String(w.title ?? ""), url: Boolean(s.url), chat: UUID.test(chat) ? chat : undefined };
+    return { id: low(s.id), workspace: low(w.id), pane: low(p.id), sibling: sibling(w.layout, low(p.id)), index: s.index_in_pane, type: s.type, title: String(s.title ?? ""), selected: s.selected_in_pane === true, focused: s.focused === true, name: String(w.title ?? ""), url: Boolean(s.url), chat: UUID.test(chat) ? chat : undefined };
   })));
 }
 
@@ -68,11 +77,73 @@ export function connect() {
   return { cli, cmux, rpc };
 }
 
+function pairFor(tabs: Tab[], surface: string) {
+  const term = tabs.find(t => t.id === surface && t.type === "terminal" && UUID.test(t.workspace) && UUID.test(t.pane));
+  const pages = tabs.filter(p => p.chat === surface && p.workspace === term?.workspace);
+  if (term && pages.length === 1 && UUID.test(pages[0].pane)) return { term, page: pages[0] };
+}
+
+async function geometry(rpc: Rpc, term: Tab, page: Tab) {
+  if (term.sibling !== page.pane) return;
+  const list = await rpc("pane.list", { workspace_id: term.workspace });
+  if (low(list.workspace_id) !== term.workspace) return;
+  const frame = (t: Tab) => list.panes.find((p: any) => low(p.id) === t.pane && low(p.selected_surface_id) === t.id)?.pixel_frame;
+  const t = frame(term), p = frame(page);
+  if (![t, p].every(f => f && [f.x, f.y, f.width, f.height].every(Number.isFinite) && f.width > 0 && f.height > 0)) return;
+  const near = (a: number, b: number) => Math.abs(a - b) <= 1;
+  if (near(t.x, p.x) && near(t.width, p.width) && near(t.y, p.y + p.height))
+    return { size: t.height, total: t.height + p.height, grow: "up", undo: "down" };
+  if (!near(t.y, p.y) || !near(t.height, p.height)) return;
+  if (near(t.x, p.x + p.width)) return { size: t.width, total: t.width + p.width, grow: "left", undo: "right" };
+  if (near(p.x, t.x + t.width)) return { size: t.width, total: t.width + p.width, grow: "right", undo: "left" };
+}
+
+// A fresh tree and pane list must still agree just before moving the divider.
+export function questionWatcher(rpc: Rpc, log: (line: string) => void) {
+  const states = new Map<string, { open: boolean; since: number; applied: boolean;
+    grown?: { amount: number; size: number; total: number; grow: string; term: string; page: string; workspace: string } }>();
+  const enabled = process.env.ORCA_CHAT_QUESTION_RESIZE !== "0";
+  return async (tabs: Tab[]) => {
+    if (!enabled) return;
+    const surfaces = new Set(tabs.flatMap(t => t.chat && pairFor(tabs, t.chat) ? [t.chat] : []));
+    for (const surface of states.keys()) if (!surfaces.has(surface)) states.delete(surface);
+    if (!surfaces.size) return;
+    const open = waitingQuestions(surfaces);
+    for (const surface of surfaces) {
+      const waiting = open.has(surface);
+      let state = states.get(surface);
+      if (!state && !waiting) continue;
+      if (!state) states.set(surface, state = { open: true, since: Date.now(), applied: false });
+      if (state.open !== waiting) { state.open = waiting; state.since = Date.now(); }
+      if (waiting === state.applied || Date.now() - state.since < 400) continue;
+      state.applied = waiting;
+      const saved = state.grown;
+      state.grown = undefined;
+      const pair = pairFor(await readTabs(rpc), surface);
+      if (!pair) continue;
+      const { term, page } = pair;
+      const g = await geometry(rpc, term, page);
+      if (!g || waitingQuestions(new Set([surface]), true).has(surface) !== waiting) continue;
+      if (waiting) {
+        const amount = Math.min(800, Math.round(g.total * 0.6 - g.size));
+        if (amount < 1) continue;
+        log("grow " + surface + " " + g.grow + " " + amount);
+        await rpc("pane.resize", { workspace_id: term.workspace, pane_id: term.pane, direction: g.grow, amount });
+        state.grown = { amount, size: g.size + amount, total: g.total, grow: g.grow, term: term.pane, page: page.pane, workspace: term.workspace };
+      } else if (saved && saved.workspace === term.workspace && saved.term === term.pane && saved.page === page.pane &&
+          saved.grow === g.grow && Math.abs(g.size - saved.size) <= 1 && Math.abs(g.total - saved.total) <= 1) {
+        log("shrink " + surface + " " + g.undo + " " + saved.amount);
+        await rpc("pane.resize", { workspace_id: term.workspace, pane_id: page.pane, direction: g.undo, amount: saved.amount });
+      }
+    }
+  };
+}
+
 // Detached, with no terminal of its own in the environment: it lives as long as cmux.
 // lockf ends at once when a watcher runs.
 export function startTabs() {
   const env: Record<string, string> = {};
-  for (const [key, value] of Object.entries(process.env)) if (value && (/^(HOME|USER|PATH|TMPDIR|LANG)$/.test(key) || /^(ORCA_CHAT_|CMUX_SOCKET|CMUX_BUNDLED_CLI_PATH)/.test(key))) env[key] = value;
+  for (const [key, value] of Object.entries(process.env)) if (value && (/^(HOME|USER|PATH|TMPDIR|LANG|CLAUDE_CONFIG_DIR|CODEX_HOME)$/.test(key) || /^(ORCA_CHAT_|CMUX_SOCKET|CMUX_BUNDLED_CLI_PATH)/.test(key))) env[key] = value;
   ensureStateDir();
   const log = openSync(join(STATE_DIR, "tabs.log"), "a", 0o600);
   const child = spawn("/usr/bin/lockf", ["-k", "-s", "-t", "0", join(STATE_DIR, "tabs.lock"), process.execPath, import.meta.path], { cwd: "/", env, detached: true, stdio: ["ignore", log, log] });
@@ -212,8 +283,17 @@ if (import.meta.main) run(async () => {
     }
   }
 
-  let written = "";
+  let written = "", questionBusy = false;
+  let questionTabs: Tab[] = [];
+  const questions = questionWatcher(rpc, line => console.error(new Date().toISOString(), line));
+  setInterval(async () => {
+    if (questionBusy || !questionTabs.length) return;
+    questionBusy = true;
+    try { await questions(questionTabs); } catch (error: any) { log(error?.message ?? "Question check failed"); }
+    finally { questionBusy = false; }
+  }, 250);
   async function list(all: Tab[]): Promise<Project[]> {
+    questionTabs = all;
     const projects = await readProjects(rpc, all), text = JSON.stringify({ pid: process.pid, projects });
     if (text !== written) writePrivate(CHATS_FILE, text);
     written = text;
