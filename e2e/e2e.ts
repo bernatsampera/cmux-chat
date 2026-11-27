@@ -299,7 +299,7 @@ const capped = [...appCss.matchAll(/([^{}]+)\{[^{}]*max-width: 760px/g)].map((m)
 check("F73", "each part that cmux caps at 760 px is wider", capped.length > 10 && capped.every((s) => wide.includes(s)), { capped, wide });
 const chatTsx = readFileSync(join(DATA, "cmux-src/agent-chat/src/components/Chat.tsx"), "utf8"), card = chatTsx.slice(chatTsx.indexOf('<div id="chat-card">'));
 check("F20", "in the pinned source the input, send, and stop are inside that card", card.includes('id="chat-input"') && card.includes("{chatActions}") && !chatTsx.slice(chatTsx.indexOf("return ("), chatTsx.indexOf('<div id="chat-card">')).includes("<textarea"));
-check("F20", "the follow page has no composer", !/<(input|textarea|form|button)|contenteditable/i.test(followPage.body.replace('<button id="rename" hidden>Rename</button>', "")));
+check("F20", "the follow page has no composer", !/<(input|textarea|form|button)|contenteditable/i.test(followPage.body.split("<script>")[0].replace('<button id="rename" hidden>Rename</button>', "")));
 const csp = (p: any) => Object.fromEntries(String(p.headers["content-security-policy"] ?? "").split("; ").map((d: string) => [d.split(" ")[0], d.split(" ").slice(1).join(" ")]));
 check("F25", "the policy has no remote source", [followPage, chatPage, landing].every((p) => csp(p)["img-src"] === "'self' data: blob:" && csp(p)["default-src"] === "'self'" && !/https?:|\*/.test(p.headers["content-security-policy"])), csp(chatPage));
 check("F25", "the policy allows what the app uses: inline style and script, its WebSocket, its base", csp(chatPage)["style-src"].includes("'unsafe-inline'") && csp(chatPage)["script-src"].includes("'unsafe-inline'") && csp(chatPage)["connect-src"] === `'self' ws://127.0.0.1:${port}` && csp(chatPage)["base-uri"] === "'self'");
@@ -346,7 +346,7 @@ const noteEl: any = { textContent: "" }, stateEl: any = { textContent: "" };
 const element = () => { const e: any = { className: "", textContent: "", children: [], style: {}, setAttribute() {}, focus() {}, select() { e.selected = true; }, append: (...nodes: any[]) => nodes.forEach(c => { c.parent = e; e.children.push(c); }), insertBefore(c: any, at: any) { c.remove(); e.children.splice(at ? e.children.indexOf(at) : e.children.length, 0, c); c.parent = e; }, remove() { const i = e.parent?.children.indexOf(e) ?? -1; if (i >= 0) e.parent.children.splice(i, 1); }, scrollIntoView: () => (scrolled = e) }; return e; };
 let scrolled: any;
 const ids: Record<string, any> = { note: noteEl, state: stateEl, rename: element(), bar: element(), tabs: element(), plus: element() };
-const doc: any = { visibilityState: "visible", title: "", getElementById: (id: string) => ids[id], createElement: (tag: string) => { if (tag !== "iframe") return element(); const f: any = { tag, className: "", src: "", remove() { frames.splice(frames.indexOf(f), 1); } }; made.push(f); return f; }, body: { append: (f: any) => (frames.push(f), f.onload()) }, addEventListener: (_: string, fn: Function) => (doc.wake = fn) };
+const doc: any = { visibilityState: "visible", title: "", getElementById: (id: string) => ids[id], createElement: (tag: string) => { if (tag !== "iframe") return element(); const f: any = { tag, className: "", src: "", remove() { frames.splice(frames.indexOf(f), 1); } }; made.push(f); return f; }, body: { append: (f: any) => (frames.push(f), f.onload()) }, addEventListener: (type: string, fn: Function) => { if (type === "visibilitychange") doc.wake = fn; } };
 let fetches = 0, inFlight = 0, most = 0, fake: any = null;
 const sent: { path: string; init: any }[] = [];
 const pageFetch = async (path: string, init: any) => {
@@ -363,7 +363,7 @@ const pageFetch = async (path: string, init: any) => {
     inFlight--;
   }
 };
-new Function("document", "location", "fetch", "setTimeout", "clearTimeout", script)(doc, { search: "?cmux=ME" }, pageFetch, (fn: Function, ms: number) => timers.push(Object.assign(fn, { ms })), () => {});
+new Function("window", "document", "location", "fetch", "setTimeout", "clearTimeout", script)({ addEventListener() {} }, doc, { search: "?cmux=ME" }, pageFetch, (fn: Function, ms: number) => timers.push(Object.assign(fn, { ms })), () => {});
 const tick = async () => { const before = timers.length; timers.at(-1)?.(); await until(() => timers.length > before, 3_000); };
 await until(() => timers.length > 0);
 const visible = () => frames.filter((f) => f.className === "on").map((f) => f.src);
@@ -725,7 +725,7 @@ x = await chatOpen(GOOD);
 check("F70", "a second cmux-chat-open keeps the server", x.code === 0 && launch().pid === cmuxServer && x.calls.length === 3, x);
 check("F68", "the token is not in the server log", !readFileSync(logFile, "utf8").includes(token) && readFileSync(logFile, "utf8").length > 0);
 const down: any = { textContent: "" };
-new Function("document", "location", "fetch", "setTimeout", "clearTimeout", script)({ visibilityState: "visible", getElementById: (id: string) => (id === "note" ? down : { textContent: "" }), addEventListener() {} }, { search: q1 }, async () => { throw new Error("down"); }, () => 0, () => {});
+new Function("window", "document", "location", "fetch", "setTimeout", "clearTimeout", script)({ addEventListener() {} }, { visibilityState: "visible", getElementById: (id: string) => (id === "note" ? down : { textContent: "" }), addEventListener() {} }, { search: q1 }, async () => { throw new Error("down"); }, () => 0, () => {});
 await until(() => down.textContent);
 check("F67", "the page names cmux-chat-open when the server is off", /Run cmux-chat-open/.test(down.textContent), down.textContent);
 // ---- F72 the project group ----

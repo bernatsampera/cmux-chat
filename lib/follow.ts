@@ -306,6 +306,28 @@ const CODEX = icon("#10a37f", 1.2, "M8 1.8l4.9 2.8v5.7L8 13.2l-4.9-2.9V4.6L8 1.8
 // shows after its load, and the frame before it stays until then: no white flash.
 // color-scheme: a frame with another scheme than its page gets a white canvas.
 // --bar is the height of the strip at the top, --foot of the state line at the bottom.
+// Both documents use the same rules so selecting text keeps the keyboard in the page.
+export const PLAIN_CLICK = `(focus, extra = '') => {
+  const controls = 'a,button,input,textarea,select,summary,label,[contenteditable],[role=button],[tabindex],.code-copy,.cc-copy' + extra;
+  const plain = e => e.button === 0 && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.target.closest(controls);
+  let down, timer;
+  function cancel() { clearTimeout(timer); down = null; }
+  document.addEventListener('pointerdown', e => {
+    cancel();
+    if (plain(e)) down = e;
+  }, true);
+  document.addEventListener('pointerup', e => {
+    if (!down || down.pointerId !== e.pointerId) return;
+    const distance = Math.hypot(e.clientX - down.clientX, e.clientY - down.clientY);
+    down = null;
+    if (distance < 5 && plain(e)) timer = setTimeout(() => {
+      if (document.getSelection()?.isCollapsed) focus();
+    }, 350);
+  }, true);
+  document.addEventListener('pointercancel', cancel, true);
+  document.addEventListener('dblclick', cancel, true);
+}`;
+
 export const PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Chat</title><style>
 :root{color-scheme:dark;--page:color-mix(in srgb, #f8f8f2 9%, #212121);background:var(--page);--bar:0px;--foot:0px}:root:has(#bar.tabs){--bar:32px}:root:has(#state:not(:empty)){--foot:28px}body{margin:0;background:var(--page);color:#999;font:14px -apple-system,sans-serif}
 iframe{position:fixed;inset:var(--bar) 0 var(--foot);width:100%;height:calc(100% - var(--bar) - var(--foot));border:0;visibility:hidden;color-scheme:light;background:var(--page)}iframe.on{visibility:visible}#note{padding:calc(32px + var(--bar)) 32px 32px}
@@ -483,5 +505,18 @@ async function poll() {
 menu.onblur = () => { menu.hidden = true; };
 menu.onkeydown = e => { if (e.key === "Escape") menu.hidden = true; };
 document.addEventListener("visibilitychange", poll);
+let lastFocus = -Infinity;
+function focusTerminal() {
+  const now = performance.now();
+  if (now - lastFocus < 400) return;
+  lastFocus = now;
+  pick(me);
+}
+(${PLAIN_CLICK})(focusTerminal, ',.tab,#plus');
+window.addEventListener('message', e => {
+  const iframe = frames.get(wanted);
+  if (iframe && iframe.className === 'on' && e.source === iframe.contentWindow &&
+      e.origin === location.origin && e.data?.type === 'orca-chat-focus') focusTerminal();
+});
 poll();
 </script></body></html>`;

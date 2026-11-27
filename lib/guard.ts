@@ -6,7 +6,7 @@
 import { basename } from "node:path";
 import { readFileSync } from "node:fs";
 import { UUID, signLink } from "./common";
-import { PAGE, followSurface, pickChat, renameChat } from "./follow";
+import { PAGE, PLAIN_CLICK, followSurface, pickChat, renameChat } from "./follow";
 import { liveJoin, liveServer } from "./live";
 import "./queue";
 
@@ -104,6 +104,10 @@ p:has(+ .markdown-code){margin-bottom:4px}
 :is(.msg .body .markdown-code,.markdown-code)[data-kind="quote"] :is(pre,pre code,pre span){font:inherit;color:inherit!important;background:none!important}
 `;
 
+const FOCUS = `<script id="cmux-chat-focus">if (parent !== window) (${PLAIN_CLICK})(() => {
+  parent.postMessage({type:"orca-chat-focus"}, location.origin);
+});</script>`;
+
 const BLOCKS = `<script id="cmux-chat-blocks">(() => {
   let pending = false;
   function schedule() {
@@ -194,7 +198,7 @@ async function harden(res: Response | undefined, host: string, sidecar = false) 
   if (!res?.headers.get("content-type")?.startsWith("text/html")) return res;
   const headers = new Headers(res.headers);
   headers.set("content-security-policy", `default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self' ws://${host}; object-src 'none'; base-uri 'self'; form-action 'none'; frame-ancestors 'self'`);
-  const text = (await res.text()).replace("</head>", () => `${sidecar ? STICK + BLOCKS + UI + UI_STYLE + LOOK + LOOK_STYLE : ""}<style>:root{--font-size-base:16px!important;--font-size-code:14px!important}:is(${WIDE}){max-width:none!important;padding-left:16px;padding-right:16px}${TERMINAL}${sidecar ? BLOCK_STYLE : ""}#chat-card{display:none!important}</style></head>`);
+  const text = (await res.text()).replace("</head>", () => `${sidecar ? FOCUS + STICK + BLOCKS + UI + UI_STYLE + LOOK + LOOK_STYLE : ""}<style>:root{--font-size-base:16px!important;--font-size-code:14px!important}:is(${WIDE}){max-width:none!important;padding-left:16px;padding-right:16px}${TERMINAL}${sidecar ? BLOCK_STYLE : ""}#chat-card{display:none!important}</style></head>`);
   return new Response(text, { status: res.status, headers });
 }
 

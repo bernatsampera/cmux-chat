@@ -5,7 +5,28 @@
 #messages { height:100vh; overflow:auto; padding-block:20px } .msg { padding-bottom:14px } .msg.user .body { padding:10px 14px; white-space:pre-wrap }
 .markdown-code { background:var(--bg-code) } button { color:inherit; background:var(--bg-raised); border:0; cursor:pointer }
 </style>
-<script id="cmux-chat-stick">(() => {
+<script id="cmux-chat-focus">if (parent !== window) ((focus, extra = '') => {
+  const controls = 'a,button,input,textarea,select,summary,label,[contenteditable],[role=button],[tabindex],.code-copy,.cc-copy' + extra;
+  const plain = e => e.button === 0 && !e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey && !e.target.closest(controls);
+  let down, timer;
+  function cancel() { clearTimeout(timer); down = null; }
+  document.addEventListener('pointerdown', e => {
+    cancel();
+    if (plain(e)) down = e;
+  }, true);
+  document.addEventListener('pointerup', e => {
+    if (!down || down.pointerId !== e.pointerId) return;
+    const distance = Math.hypot(e.clientX - down.clientX, e.clientY - down.clientY);
+    down = null;
+    if (distance < 5 && plain(e)) timer = setTimeout(() => {
+      if (document.getSelection()?.isCollapsed) focus();
+    }, 350);
+  }, true);
+  document.addEventListener('pointercancel', cancel, true);
+  document.addEventListener('dblclick', cancel, true);
+})(() => {
+  parent.postMessage({type:"orca-chat-focus"}, location.origin);
+});</script><script id="cmux-chat-stick">(() => {
   let el, pinned = true, frame = 0, drag = null, dragging = false, lastTop = 0, touchY, downUntil = 0;
   const gap = () => el.scrollHeight - el.clientHeight - el.scrollTop;
   function schedule() {
