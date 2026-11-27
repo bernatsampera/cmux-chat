@@ -169,8 +169,11 @@ if (import.meta.main) run(async () => {
   let boot = ""; // of this cmux. Another one has other terminals.
   const seen = new Set<string>(); // terminals that had a chat page
   const known = new Set<string>(); // pages
+  const closeWithPage = process.env.ORCA_CHAT_CLOSE_WITH_PAGE !== "0";
+  let previous: Tab[] = [];
   async function read(workspace?: string): Promise<Tab[]> {
     const all = await readTabs(rpc, workspace);
+    if (closeWithPage) previous = workspace ? previous.filter(t => t.workspace !== workspace).concat(all) : all;
     for (const page of all.filter((t) => t.chat)) {
       known.add(page.id);
       if (all.some((t) => t.type === "terminal" && t.id === page.chat)) seen.add(page.chat!);
@@ -213,6 +216,7 @@ if (import.meta.main) run(async () => {
 
   // Closes the pages of terminals that are gone. A terminal can be out of the list for
   // a moment, for example when it moves, so two reads must agree, in the same cmux.
+  const closingPages = new Set<string>();
   async function close(all: Tab[]) {
     const gone = (tabs: Tab[]) => tabs.filter((p) => p.chat && seen.has(p.chat) && tabs.some(t => t.workspace === p.workspace && !t.chat) && pagesOf(tabs, p.workspace).length > 1 && !tabs.some((t) => t.id === p.chat));
     const first = gone(all);
@@ -226,7 +230,45 @@ if (import.meta.main) run(async () => {
       // First the panes: cmux must not select a page for us.
       const stay = again.find((t) => t.workspace === page.workspace && t.type === "terminal" && t.selected && again.some((p) => p.chat === t.id));
       if (page.selected && stay) await pair(page.workspace, stay.id);
+      if (closeWithPage) closingPages.add(page.id);
       await rpc("surface.close", { workspace_id: page.workspace, surface_id: page.id });
+    }
+  }
+
+  type PendingClose = { page: Tab; since?: number };
+  const closedPages = new Map<string, PendingClose>();
+  function afterPageClose(id: string, workspace: string) {
+    if (!closeWithPage || closingPages.delete(id) || !boot || closedPages.has(id)) return;
+    const page = previous.find(t => t.id === id);
+    if (!page?.chat || !seen.has(page.chat) || !UUID.test(page.workspace) || (workspace && workspace !== page.workspace)) return;
+    const before = previous.filter(t => t.workspace === page.workspace);
+    if (before.length === 2 && before.some(t => t.type === "terminal" && t.id === page.chat)) closedPages.set(id, { page });
+  }
+
+  function terminalAlone(tabs: Tab[], page: Tab) {
+    const remaining = tabs.filter(t => t.workspace === page.workspace);
+    return remaining.length === 1 && remaining[0].type === "terminal" && remaining[0].id === page.chat && !tabs.some(t => t.chat === page.chat);
+  }
+
+  async function confirmPageCloses(all: Tab[], pending: PendingClose[]) {
+    for (const candidate of pending) {
+      const { page, since } = candidate;
+      if (!terminalAlone(all, page)) {
+        closedPages.delete(page.id);
+        continue;
+      }
+      if (since === undefined) {
+        candidate.since = Date.now();
+        setTimeout(relist, 1500);
+        continue;
+      }
+      if (Date.now() - since < 1500) continue;
+      closedPages.delete(page.id);
+      if (JSON.parse(await cmux(["events", "--snapshot"])).boot_id !== boot) stop("another cmux");
+      if (terminalAlone(await read(), page)) {
+        await rpc("workspace.close", { workspace_id: page.workspace });
+        log("closed chat workspace " + page.workspace + " after its page was closed");
+      }
     }
   }
 
@@ -365,8 +407,10 @@ if (import.meta.main) run(async () => {
         if (strip) await open(strip);
         else if (pick) await pair(...pick);
         else {
+          const pending = [...closedPages.values()];
           const all = await read();
           fails = 0; silentSince = 0;
+          await confirmPageCloses(all, pending);
           await list(all);
           await closeWorkspaces(all);
           if (!only) {
@@ -417,6 +461,7 @@ if (import.meta.main) run(async () => {
       if (e.boot_id && boot && e.boot_id !== boot) stop("another cmux");
       if (e.boot_id && !boot) (boot = e.boot_id), sweep();
       const id = low(e.surface_id), at = Date.parse(e.occurred_at);
+      if (e.name === "surface.closed" && e.payload?.kind === "browser") afterPageClose(id, low(e.workspace_id));
       if (e.name === "surface.closed" && seen.has(id)) sweep();
       if (LISTED.test(e.name)) changed();
       if (e.name !== "surface.selected" || !UUID.test(e.workspace_id ?? "") || ours.some((o) => o.id === id && at >= o.from && at <= o.to)) continue;

@@ -57,6 +57,8 @@ When Claude Code opens a multiple-choice question, the terminal grows to about 6
 
 Set `ORCA_CHAT_QUESTION_RESIZE=0` in the helper's environment to turn off automatic resizing.
 
+Closing the chat page also closes its workspace when it contains only that page and its terminal. Set `ORCA_CHAT_CLOSE_WITH_PAGE=0` in the helper's environment to keep the terminal open.
+
 ## Tests and license
 
 Run `./e2e/install.e2e.sh` to repeat the install checks with a fresh temporary home. It downloads dependencies and uses a fake cmux command. Other tests under `e2e/` cover chat, tabs, and sidebar behavior. Some create real cmux workspaces on screen.
