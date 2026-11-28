@@ -7,6 +7,7 @@
 // Bun uses only the first plugin for a file, so lib/live.ts is called from here.
 import { plugin } from "bun";
 import { addLive } from "./live";
+import { patchCommands } from "./commands";
 
 const AT = '      case "attachment":\n';
 const ADD = `      case "queue-operation": {
@@ -26,7 +27,7 @@ plugin({
     build.onLoad({ filter: /\/agent-chat\/adapters\/transcript\.ts$/ }, async ({ path }) => {
       const source = await Bun.file(path).text(), parts = source.split(AT);
       if (parts.length !== 2) console.log("[orca-chat] queued messages are off: the parser has changed");
-      return { loader: "ts", contents: addLive(parts.length === 2 ? parts.join(ADD) : source) };
+      return { loader: "ts", contents: patchCommands(addLive(parts.length === 2 ? parts.join(ADD) : source)) };
     });
   },
 });

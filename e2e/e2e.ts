@@ -59,7 +59,7 @@
 //   F72 (the project group) A workspace that is in a group moves. A folder with no project gets a group. /a/b takes /a/bc. The outer project wins. Two groups with one key: it guesses. A worktree outside the folder has no group. A cmux call that hangs or fails stops the chat or claude. It calls anything other than list and add.
 // Page (its script runs here on a small fake DOM, not in a browser)
 //   F50 A switch makes a new frame, so the scroll is lost. More than 5 frames stay.
-//   F51 It polls while hidden, polls twice at the same time, or stops after an error.
+//   F51 It polls too often while hidden, polls twice at the same time, or stops after an error.
 //   F52 A title or a message from a terminal becomes HTML.
 //
 // Run: bun e2e/e2e.ts   (needs bin/install first)
@@ -69,6 +69,7 @@
 import { config } from "../lib/config";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { runInNewContext } from "node:vm";
 import { request } from "node:http";
 import { createServer } from "node:net";
 import { homedir, tmpdir } from "node:os";
@@ -226,9 +227,14 @@ claudeState(PA, SA);
 const twin = await claude(surface.A, SA2);
 s = await state();
 check("F03", "two agents, none in the foreground: a message", s.session === null && /More than one agent/.test(s.message!), s);
-const front = await claude(surface.A, SP2, true);
+const front = await claude(surface.A, SP2, true, { status: "busy" });
 s = await state();
 check("F03", "two agents, one in the foreground: that one", s.session === SP2, { s, stat: spawnSync("/bin/ps", ["-o", "stat=,tty=", "-p", String(front)], { encoding: "utf8" }).stdout });
+const stripFile = join(STATE, "chats.json");
+writeFileSync(stripFile, JSON.stringify({ pid: process.pid, projects: [{ id: "foreground", chats: [{ terminal: surface.A }] }] }), { mode: 0o600 });
+const foreground: any = await state();
+check("F03", "the strip shows the foreground agent status", foreground.session === SP2 && foreground.status === "busy" && foreground.chats[0]?.status === "busy");
+writeFileSync(stripFile, "{}");
 const fakeCodex = await agent(surface.A, "codex", true);
 await Bun.sleep(1_700); // the list of codex processes is 1.5 s old at most
 s = await state();
@@ -237,6 +243,13 @@ for (const pid of [twin, front, fakeCodex]) process.kill(pid, "SIGKILL");
 await until(() => !alive(twin) && !alive(front) && !alive(fakeCodex));
 s = await state();
 check("F04", "dead processes do not count, their files are still there", s.session === SA && existsSync(join(CLAUDE, "sessions", `${twin}.json`)), s);
+
+claudeState(PA, SA, { kind: "bg" });
+const resumed = await claude(surface.A, SA);
+const resumedState = await state(), mapping = store("claude").sessions[SA];
+check("F02", "same-terminal resume updates the saved process", resumedState.session === SA && mapping.agentPid === resumed && mapping.agentPidStart === lstart(resumed));
+process.kill(resumed, "SIGKILL");
+claudeState(PA, SA);
 
 const SLOW = 2_500; // the list of codex processes is read every 1.5 s
 const nested = await agent(surface.X, "codex", false, openRollouts(SX));
@@ -382,17 +395,64 @@ for (let i = 0; i < 4; i++) await tick();
 check("F09", "the page hides the chat and shows the text for a shell", visible().length === 0 && /No Claude Code/.test(noteEl.textContent), noteEl.textContent);
 const lineOf = async (x: object) => { const keep = fake; fake = { session: SA, title: "", message: null, ...x }; await tick(); fake = keep; return stateEl.className + "|" + stateEl.textContent; };
 const lines = { busy: await lineOf({ status: "busy", since: Date.now() - 999e3 }), idle: await lineOf({ status: "idle", since: Date.now() - 185e3 }), now: await lineOf({ status: "idle", since: Date.now() }), shell: await lineOf({ status: "shell" }), waiting: await lineOf({ status: "waiting" }), other: await lineOf({ status: "<b>" }), codex: await lineOf({}) };
-check("F78", "the words of the page for each state, and none for an unknown word", lines.busy === "busy|Working" && lines.idle === "done|\u2713 Done, your turn, 3 min ago" && lines.now === "done|\u2713 Done, your turn, just now" && /^done\|.*background/.test(lines.shell) && /^ask\|.*Waiting/.test(lines.waiting) && lines.other === "|" && lines.codex === "|", lines);
+check("F78", "the words of the page for each state, and none for an unknown word", lines.busy === "busy|Working" && lines.idle === "done|\u2713 Done, your turn, 3 min ago" && lines.now === "done|\u2713 Done, your turn, just now" && /^busy\|Working in the background/.test(lines.shell) && /^ask\|.*Waiting/.test(lines.waiting) && lines.other === "|" && lines.codex === "|", lines);
 check("F78 F80", "the strip is at the top, the words are at the bottom, and the chat is between them", /iframe\{position:fixed;inset:var\(--bar\) 0 var\(--foot\);width:100%;height:calc\(100% - var\(--bar\) - var\(--foot\)\)/.test(followPage.body) && /has\(#bar\.tabs\)\{--bar:32px\}:root:has\(#state:not\(:empty\)\)\{--foot:28px\}/.test(followPage.body) && /#bar\{position:fixed;inset:0 0 auto;height:var\(--bar\)/.test(followPage.body) && /#state\{position:fixed;inset:auto 0 0;height:var\(--foot\)/.test(followPage.body) && /<div id="plus"[^>]*>\+<\/div><\/div><div id="note"><\/div><div id="state"><\/div>/.test(followPage.body));
 const barOf = async (x: object) => { fake = { session: SA, title: "", message: null, ...x }; await tick(); return ids.bar.className; };
 check("F80", "no chats: no strip, and the words stay", (await barOf({})) === "" && stateEl.textContent === "" && (await barOf({ status: "busy" })) === "" && stateEl.textContent === "Working" && (await barOf({ chats: [], status: "idle" })) === "" && stateEl.textContent.includes("Done"));
+{ // Exercise tab gestures with real DOM event bubbling.
+  const module = join(OUT, "dom.mjs");
+  writeFileSync(module, 'export { JSDOM } from "jsdom@26.1.0";');
+  const { JSDOM } = await import(module);
+  const win = new JSDOM(followPage.body, { url: "http://localhost/test/follow?cmux=me" }).window;
+  win.HTMLElement.prototype.scrollIntoView = () => {};
+  const actions: { path: string; header: string }[] = [];
+  const chats = ["idle", "busy", "waiting", "unknown"].map((status, i) => ({ id: i ? status : "me", title: status, status }));
+  win.fetch = async (path: string, init: RequestInit) => {
+    if (path.startsWith("follow/state")) return { ok: true, json: () => ({ session: null, chats }) };
+    actions.push({ path, header: new Headers(init.headers).get("x-orca-chat")! });
+    return { ok: true };
+  };
+  runInNewContext(script, { window: win, document: win.document, location: win.location, fetch: win.fetch,
+    setTimeout: win.setTimeout, clearTimeout: win.clearTimeout, URLSearchParams, AbortSignal, performance });
+  await Bun.sleep(0);
+  const tabs = [...win.document.querySelectorAll(".tab")], buttons = tabs.map(t => t.querySelector("b + button"));
+  check("F79", "tabs and plus lighten on hover with a pointer and short transition, including dim names",
+    followPage.body.includes(".tab,#plus{cursor:pointer;transition:background-color 120ms") &&
+    followPage.body.includes(".tab:hover,#plus:hover{background:#343434;color:#f8f8f2}") &&
+    followPage.body.includes(".tab.read:not(.me):hover span{opacity:1}"));
+  check("F79", "each tab has a close button after its dot", buttons.length === chats.length && buttons.every(b => b?.textContent === "×"));
+  const onlyClose = (target: string) => actions.length === 1 && actions[0].path === "follow/close?cmux=me&to=" + target && actions[0].header === "close";
+  buttons[0].click();
+  buttons[0].dispatchEvent(new win.MouseEvent("dblclick", { bubbles: true }));
+  await Bun.sleep(550);
+  check("F79", "closing the done own tab sends one close without a pick or rename", onlyClose("me") && !tabs[0].querySelector("input"));
+  const middle = (i: number) => tabs[i].dispatchEvent(new win.MouseEvent("auxclick", { button: 1, bubbles: true, cancelable: true }));
+  actions.length = 0;
+  middle(3);
+  check("F79", "middle click closes an unknown chat immediately", onlyClose("unknown"));
+  for (const [i, gesture] of [[1, () => buttons[1].click()], [2, () => middle(2)]] as const) {
+    actions.length = 0;
+    gesture();
+    const armed = !actions.length && buttons[i].textContent === "Close?";
+    gesture();
+    check("F79", chats[i].status + " needs a second click to close", armed && onlyClose(chats[i].id));
+    actions.length = 0;
+    gesture();
+  }
+  await Bun.sleep(3100);
+  const expired = buttons.slice(1, 3).every(b => b.textContent === "×");
+  buttons[1].click();
+  middle(2);
+  check("F79", "both gestures ask again after three seconds", expired && !actions.length && buttons.slice(1, 3).every(b => b.textContent === "Close?"));
+  win.close();
+}
 { // ---- F79 the strip ----
   const row = () => ids.tabs.children.map((t: any) => `${t.className}|${t.children[1].textContent}`);
   const c = (id: string, extra = {}) => ({ id, title: `chat ${id}`, agent: "claude", unread: false, ...extra });
   const min = Date.now() - 185e3;
   await barOf({ status: "busy", chats: [c("a", { status: "busy" }), c("b", { status: "waiting" }), c("me", { status: "busy" }), c("d", { status: "idle", unread: true, since: min }), c("e", { status: "idle", since: min }), c("f", { agent: "codex" }), c("g", { status: "asked", unread: true }), c("h", { status: "asked" }), c("i", { unread: true, status: "<b>" }), c("j", { status: "shell" })], plus: true });
   const shown = row();
-  check("F79", "one tab per chat, the own one is marked, each state has its own mark, an unknown one none", JSON.stringify(shown) === JSON.stringify(["tab claude busy|chat a", "tab claude ask|chat b", "tab claude busy me|chat me", "tab claude new|chat d", "tab claude read|chat e", "tab codex |chat f", "tab claude ask|chat g", "tab claude |chat h", "tab claude |chat i", "tab claude read|chat j"]), shown);
+  check("F79", "one tab per chat, the own one is marked, each state has its own mark, an unknown one none", JSON.stringify(shown) === JSON.stringify(["tab claude busy|chat a", "tab claude ask|chat b", "tab claude busy me|chat me", "tab claude new|chat d", "tab claude read|chat e", "tab codex |chat f", "tab claude ask|chat g", "tab claude |chat h", "tab claude |chat i", "tab claude busy|chat j"]), shown);
   check("F79", "the strip, the plus, and the words of the own chat", ids.bar.className === "tabs plus" && stateEl.textContent === "Working" && scrolled === ids.tabs.children[2]);
   const tips = ids.tabs.children.map((t: any) => t.title);
   check("F79", "the tooltip has the name and the words", tips[0] === "chat a\nWorking" && tips[1] === "chat b\n? Waiting for your answer in the terminal" && tips[3] === "chat d\n\u2713 Done, your turn, 3 min ago, not read" && tips[4] === "chat e\n\u2713 Done, your turn, 3 min ago" && tips[5] === "chat f", tips);
@@ -423,7 +483,7 @@ check("F80", "no chats: no strip, and the words stay", (await barOf({})) === "" 
   first.oncontextmenu({ preventDefault() { prevented = true; }, clientX: 25, clientY: 15 });
   check("F83", "right click opens Rename without picking", prevented && !ids.rename.hidden && sent.length === 0 && followPage.body.includes(">Rename</button>"));
   ids.rename.onclick();
-  const input = first.children[3];
+  const input = first.children[4];
   check("F83", "the current name is selected in the tab", input.selected && input.value === "chat a" && input.maxLength === 80);
   const key = (field: any, key: string) => field.onkeydown({ key, preventDefault() {}, stopPropagation() {} });
   const title = "<img src=x> & hello";
@@ -435,15 +495,15 @@ check("F80", "no chats: no strip, and the words stay", (await barOf({})) === "" 
   check("F83", "a stale poll keeps the optimistic title", first.children[1].textContent === title);
   const current = ids.tabs.children[1];
   current.ondblclick();
-  current.children[3].value = "  ";
-  key(current.children[3], "Enter");
-  current.children[3]?.onblur();
+  current.children[4].value = "  ";
+  key(current.children[4], "Enter");
+  current.children[4]?.onblur();
   current.ondblclick();
-  current.children[3].value = "cancel";
-  key(current.children[3], "Escape");
+  current.children[4].value = "cancel";
+  key(current.children[4], "Escape");
   current.ondblclick();
-  current.children[3].onblur();
-  check("F83", "blank, Escape and unchanged blur leave the current title alone", sent.length === 1 && current.children.length === 3 && current.children[1].textContent === "chat me");
+  current.children[4].onblur();
+  check("F83", "blank, Escape and unchanged blur leave the current title alone", sent.length === 1 && current.children.length === 4 && current.children[1].textContent === "chat me");
   await barOf({ chats: [] });
   check("F80", "the list is gone: no strip", ids.tabs.children.length === 0 && ids.bar.className === "", ids.bar.className);
   fake = null;
@@ -473,13 +533,13 @@ check("F51", "then the chat comes back", visible()[0] === "s/t-many-7" && noteEl
 doc.visibilityState = "hidden";
 const hiddenFrom = fetches;
 await tick();
-check("F51", "no request while hidden", fetches === hiddenFrom);
+check("F51", "one hidden request, next poll in 5 s", fetches === hiddenFrom + 1 && (timers.at(-1) as any).ms === 5000);
 doc.visibilityState = "visible";
 doc.wake();
 doc.wake();
 timers.at(-1)!();
 await Bun.sleep(100);
-check("F51", "it polls at once when visible, and never two at the same time", fetches === hiddenFrom + 1 && most === 1, { fetches: fetches - hiddenFrom, most });
+check("F51", "it polls at once when visible, and never two at the same time", fetches === hiddenFrom + 2 && most === 1 && (timers.at(-1) as any).ms === 400, { fetches: fetches - hiddenFrom, most });
 
 // ---- F60 to F65 the follow mode of one cmux surface ----
 const surf = { C1: uuid(), C2: uuid(), TWO: uuid(), X: uuid(), EMPTY: uuid() };
@@ -559,6 +619,12 @@ check("F82", "Codex with no turn in its rollout: no state", (s as any).status ==
   let got = await until(async () => { const y = await chats(surf.C1); return y.rows[1]?.[3] === "busy" && y; }, 4_000) as any;
   check("F79", "the chats of the project, in its order, with the live agent and its state", JSON.stringify(got) === JSON.stringify({ plus: true, rows: [[surf.C1, "one", "claude", "idle", false], [surf.X, "<b>two</b>", "codex", "busy", true], [surf.EMPTY, "three", "codex", undefined, false]] }), got ?? (await chats(surf.C1)));
   check("F79", "a chat of another project has other chats, and no plus with no folder", JSON.stringify(await chats(surf.C2)) === JSON.stringify({ plus: false, rows: [[surf.C2, "other project", "claude", "idle", false]] }), await chats(surf.C2));
+  // Claude tells cmux it waits only after 60 s: a turn that just ended is new until then.
+  claudeState(PC1, SC1, { status: "idle", statusUpdatedAt: Date.now() });
+  const fresh = await until(async () => { const y = await chats(surf.C1); return y.rows[0]?.[4] === true && y; }, 4_000);
+  claudeState(PC1, SC1, { status: "idle", statusUpdatedAt: Date.now() - 80_000 });
+  const old = await until(async () => { const y = await chats(surf.C1); return y.rows[0]?.[4] === false && y; }, 4_000);
+  check("F79", "a turn that ended under 70 s ago is new before the notice of cmux, an older one is not", Boolean(fresh && old), [fresh, old]);
   check("F80", "a chat in no group: none", JSON.stringify(await chats(uuid())) === '{"rows":[]}');
   const gone = spawnSync("/usr/bin/true").pid;
   list({ pid: gone }); const dead = await chats(surf.C1);
@@ -575,6 +641,17 @@ check("F82", "Codex with no turn in its rollout: no state", (s as any).status ==
   const saved = await get(rename(title), header);
   const payload = existsSync(renameFile) && JSON.parse(readFileSync(renameFile, "utf8"));
   check("F84", "private rename file preserves title and workspace", saved.status === 204 && payload.workspace === target && payload.title === title && Math.abs(Date.now() - payload.at) < 2000 && perm(renameFile) === "600");
+  const closeFile = join(STATE, "close.json"), closeHeader = { "x-orca-chat": "close" };
+  const closePath = (to: string) => `/${token}/follow/close?cmux=${surf.C1}&to=${to}`;
+  const path = closePath(surf.X);
+  const unsafe = await Promise.all([get(path), get(path, { ...closeHeader, "sec-fetch-site": "cross-site" }),
+    get(path, { ...closeHeader, origin: "https://evil.example" }), get(path, { ...closeHeader, host: "evil.example" }), get(path, closeHeader, "POST")]);
+  check("F81", "unsafe, tokenless and cross-project closes write nothing", unsafe.every(r => r.status === 403) &&
+    (await get(path.slice(token.length + 1), closeHeader)).status === 404 && (await get(closePath(surf.C2), closeHeader)).status === 404 && !existsSync(closeFile));
+  const selfClose = await get(closePath(surf.C1), closeHeader), accepted = await get(path, closeHeader);
+  const close = existsSync(closeFile) && JSON.parse(readFileSync(closeFile, "utf8"));
+  check("F81", "own and sibling closes are accepted and the file is private", selfClose.status === 204 && accepted.status === 204 &&
+    close.workspace === target && close.terminal === surf.X && Math.abs(Date.now() - close.at) < 2000 && perm(closeFile) === "600");
   const own = { "x-orca-chat": "pick" }, q = (to: string, from = surf.C1) => `/${token}/follow/pick?cmux=${from}&to=${to}`;
   const refused = await Promise.all([get(q(surf.X)), get(q(surf.X), { ...own, "sec-fetch-site": "cross-site" }), get(q(surf.X), { ...own, "sec-fetch-site": "same-site" }), get(q(surf.X), { "sec-fetch-site": "same-origin", "sec-fetch-dest": "image" }), get(q(surf.X), { ...own, origin: "https://evil.example" }), get(q(surf.X), { ...own, host: "evil.example" }), get(q(surf.X), own, "POST"), get(q(surf.X), {}, "OPTIONS")]);
   const missing = await Promise.all([get(q(surf.C2), own), get(q(uuid()), own), get(q("nope"), own), get(q(""), own), get(q(surf.X, uuid()), own), get(q("new", surf.C2), own), get(q("../x"), own), get(`/follow/pick?cmux=${surf.C1}&to=${surf.X}`, own), get(`/${"0".repeat(64)}/follow/pick?cmux=${surf.C1}&to=${surf.X}`, own)]);
@@ -582,6 +659,7 @@ check("F82", "Codex with no turn in its rollout: no state", (s as any).status ==
   check("F81", "a terminal that is not in this project, no token: 404, nothing is written", missing.every((x) => x.status === 404) && !existsSync(PICK), missing.map((x) => x.status));
   const good = await get(q(surf.X.toUpperCase(), surf.C1.toUpperCase()), { ...own, "sec-fetch-site": "same-origin" }), picked = JSON.parse(readFileSync(PICK, "utf8"));
   check("F81", "the pick of the page is written, 0600", good.status === 204 && picked.from === surf.C1 && picked.to === surf.X && Math.abs(Date.now() - picked.at) < 2_000 && perm(PICK) === "600" && perm(CHATS) === "600", [good.status, picked]);
+  check("F81", "an ungrouped page can request its own terminal", (await get(q(surface.A, surface.A), own)).status === 204 && JSON.parse(readFileSync(PICK, "utf8")).to === surface.A);
   check("F81", "a new chat too", (await get(q("new"), own)).status === 204 && JSON.parse(readFileSync(PICK, "utf8")).to === "new");
   check("F81", "no other request writes it", !/access-control/i.test(JSON.stringify(good.headers)) && (await get(`/${token}/follow/pick/${q1}`, own)).status !== 204);
 }

@@ -7,9 +7,9 @@
 // page shows as a strip (lib/follow.ts), and it opens the chat that was picked there.
 import { config } from "./config";
 import { spawn } from "node:child_process";
-import { openSync, readFileSync } from "node:fs";
+import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { join } from "node:path";
-import { CHATS_FILE, PICK_FILE, RENAME_FILE, validTitle, STATE_DIR, UUID, ensureStateDir, refuse, run, writePrivate, type Chat, type Project } from "./common";
+import { CHATS_FILE, CLOSE_FILE, CODEX_DIR, MENUS_FILE, DATA_DIR, PICK_FILE, RENAME_FILE, validTitle, STATE_DIR, UUID, ensureStateDir, readStore, Refusal, refuse, run, writePrivate, type Chat, type Project } from "./common";
 import { waitingQuestions } from "./follow";
 
 // The second form is the one-time link, until the page has followed it.
@@ -17,7 +17,7 @@ const PAGE = new RegExp(`^http://127\\.0\\.0\\.1:${Number(process.env.ORCA_CHAT_
 const SWEEP = 5_000; // names, terminals that are gone, and whether cmux is there
 
 export type Rpc = (method: string, params: object) => Promise<any>;
-export interface Tab { id: string; workspace: string; pane: string; sibling?: string; index: number; type: string; title: string; selected: boolean; focused: boolean; name: string; url: boolean; chat?: string }
+export interface Tab { id: string; workspace: string; window: string; visible: boolean; pane: string; sibling?: string; index: number; type: string; title: string; selected: boolean; focused: boolean; name: string; url: boolean; chat?: string }
 
 const low = (x: unknown) => String(x ?? "").toLowerCase();
 
@@ -32,10 +32,10 @@ function sibling(layout: any, pane: string): string | undefined {
 // The tabs of one workspace, or of all. The URL of a page holds the token: it stays in here.
 export async function readTabs(rpc: Rpc, workspace?: string): Promise<Tab[]> {
   const tree = await rpc("system.tree", workspace ? { workspace_id: workspace } : { all_windows: true });
-  const list = tree.windows.flatMap((w: any) => w.workspaces).filter((w: any) => !workspace || low(w.id) === low(workspace));
+  const list = tree.windows.flatMap((window: any) => window.workspaces.map((w: any) => ({ ...w, window: low(window.id) }))).filter((w: any) => !workspace || low(w.id) === low(workspace));
   return list.flatMap((w: any) => w.panes.flatMap((p: any) => p.surfaces.map((s: any) => {
     const chat = s.type === "browser" ? low(PAGE.exec(s.url ?? "")?.[1]) : "";
-    return { id: low(s.id), workspace: low(w.id), pane: low(p.id), sibling: sibling(w.layout, low(p.id)), index: s.index_in_pane, type: s.type, title: String(s.title ?? ""), selected: s.selected_in_pane === true, focused: s.focused === true, name: String(w.title ?? ""), url: Boolean(s.url), chat: UUID.test(chat) ? chat : undefined };
+    return { id: low(s.id), workspace: low(w.id), window: w.window, visible: w.selected === true, pane: low(p.id), sibling: sibling(w.layout, low(p.id)), index: s.index_in_pane, type: s.type, title: String(s.title ?? ""), selected: s.selected_in_pane === true, focused: s.focused === true, name: String(w.title ?? ""), url: Boolean(s.url), chat: UUID.test(chat) ? chat : undefined };
   })));
 }
 
@@ -63,15 +63,79 @@ export async function readProjects(rpc: Rpc, all: Tab[]): Promise<Project[]> {
 const NEW_CHAT = "Claude + chat";
 export const command = () => config("cmux.json").commands.find((c: any) => c.name === NEW_CHAT);
 
+// Scan complete rows backwards, keeping split UTF-8 characters together.
+function claudeTitle(path: string): unknown {
+  const fd = openSync(path, "r");
+  try {
+    const size = fstatSync(fd).size, chunk = 1 << 20, limit = Math.max(0, size - 8 * chunk);
+    let end = size, rest = Buffer.alloc(0);
+    while (end > limit) {
+      const start = Math.max(limit, end - chunk), part = Buffer.alloc(end - start);
+      if (readSync(fd, part, 0, part.length, start) !== part.length) return;
+      const bytes = rest.length ? Buffer.concat([part, rest]) : part;
+      let right = bytes.length;
+      while (right > 0) {
+        const newline = bytes.lastIndexOf(10, right - 1);
+        if (newline < 0 && start > 0) break;
+        const line = bytes.subarray(newline + 1, right);
+        if (line.includes('"ai-title"')) {
+          try {
+            const row = JSON.parse(line.toString());
+            if (row.type === "ai-title") return row.aiTitle;
+          } catch {}
+        }
+        right = newline;
+      }
+      rest = bytes.subarray(0, Math.max(0, right));
+      end = start;
+    }
+  } finally { closeSync(fd); }
+}
+
+function codexTitles() {
+  const titles = new Map<string, unknown>();
+  for (const line of readFileSync(join(CODEX_DIR, "session_index.jsonl"), "utf8").split("\n")) {
+    try {
+      const row = JSON.parse(line);
+      titles.set(row.id, row.thread_name);
+    } catch {}
+  }
+  return titles;
+}
+
+function shortTitle(name: unknown) {
+  if (typeof name !== "string") return;
+  const words = name.trim().replace(/(?:…|\.\.\.)$/, "").trim().split(/\s+/).slice(0, 6);
+  while (words.join(" ").length > 48) words.pop();
+  return words.join(" ");
+}
+
 // Stop the child if cmux takes too long.
 export function connect() {
   const cli = process.env.CMUX_BUNDLED_CLI_PATH || Bun.which("cmux") || refuse("the cmux CLI is not on PATH");
   async function cmux(args: string[], input = ""): Promise<string> {
     const child = Bun.spawn([cli, ...args], { stdin: Buffer.from(input), stdout: "pipe", stderr: "pipe" });
-    const timer = setTimeout(() => child.kill(9), 5_000);
-    const [out, err, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
-    clearTimeout(timer);
-    return code === 0 ? out : refuse(err.trim().split("\n")[0] || "cmux does not answer");
+    const started = Date.now(), readers = [child.stdout.getReader(), child.stderr.getReader()];
+    const output = readers.map(async reader => {
+      const chunks: Uint8Array[] = [];
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) return Buffer.concat(chunks).toString();
+        chunks.push(value);
+      }
+    });
+    let timer: Timer;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        reject(new Refusal(`${args[1]} timed out after ${Date.now() - started} ms`));
+        child.kill(9);
+        for (const reader of readers) void reader.cancel().catch(() => {});
+      }, 5_000);
+    });
+    try {
+      const [[out, err], code] = await Promise.race([Promise.all([Promise.all(output), child.exited]), deadline]);
+      return code === 0 ? out : refuse(err.trim().split("\n")[0] || "cmux does not answer");
+    } finally { clearTimeout(timer!); }
   }
   const rpc: Rpc = async (method, params) => JSON.parse(await cmux(["rpc", method, "-"], JSON.stringify(params)));
   return { cli, cmux, rpc };
@@ -98,19 +162,49 @@ async function geometry(rpc: Rpc, term: Tab, page: Tab) {
   if (near(p.x, t.x + t.width)) return { size: t.width, total: t.width + p.width, grow: "right", undo: "left" };
 }
 
+// Claude puts these keyboard hints below its menus and permission prompts.
+const MENU_HINT = /\besc (?:to )?(?:cancel|go back|close)\b|\benter(?:\/\u2193)? (?:to )?(?:select|confirm|approve)\b|\u2191\u2193 navigate\b/i;
+
 // A fresh tree and pane list must still agree just before moving the divider.
-export function questionWatcher(rpc: Rpc, log: (line: string) => void) {
+export function questionWatcher(rpc: Rpc, log: (line: string) => void, cmux?: (args: string[]) => Promise<string>) {
   const states = new Map<string, { open: boolean; since: number; applied: boolean;
     grown?: { amount: number; size: number; total: number; grow: string; term: string; page: string; workspace: string } }>();
   const enabled = process.env.ORCA_CHAT_QUESTION_RESIZE !== "0";
+  const picker = process.env.ORCA_CHAT_PICKER_RESIZE !== "0" && cmux;
+  const menus = new Set<string>();
+  let written = "", lastRead = -Infinity;
   return async (tabs: Tab[]) => {
-    if (!enabled) return;
+    if (!enabled && !picker) return;
+    if (picker && tabs.some(t => t.visible && t.chat && pairFor(tabs, t.chat))) {
+      if (performance.now() - lastRead < 400) return;
+      // Selection can change between sweeps. Check it just before reading screens.
+      tabs = await readTabs(rpc);
+      const visible = new Set(tabs.flatMap(t => t.visible && t.chat && pairFor(tabs, t.chat) ? [t.chat] : []));
+      await Promise.all([...visible].map(async surface => {
+        try {
+          const screen = await picker(["read-screen", "--surface", surface, "--lines", "20"]);
+          const lines = screen.split("\n").map(line => line.trim()).filter(Boolean).slice(-12);
+          // The normal input box (a "❯" line between two rules) means no menu, even when the
+          // chat text just above it quotes a hint.
+          const rule = (line?: string) => /^─{10,}$/.test(line ?? "");
+          const box = lines.some((line, i) => line.startsWith("❯") && rule(lines[i - 1]) && lines.slice(i + 1).some(rule));
+          if (!box && lines.some(line => MENU_HINT.test(line))) menus.add(surface);
+          else menus.delete(surface);
+        } catch { /* Keep the last screen state until cmux answers. */ }
+      }));
+      lastRead = performance.now();
+    }
     const surfaces = new Set(tabs.flatMap(t => t.chat && pairFor(tabs, t.chat) ? [t.chat] : []));
     for (const surface of states.keys()) if (!surfaces.has(surface)) states.delete(surface);
+    if (picker) {
+      for (const id of menus) if (!surfaces.has(id)) menus.delete(id);
+      const text = JSON.stringify({ pid: process.pid, terminals: [...menus].sort() });
+      if (text !== written) { writePrivate(MENUS_FILE, text); written = text; }
+    }
     if (!surfaces.size) return;
-    const open = waitingQuestions(surfaces);
+    const open = enabled ? waitingQuestions(surfaces) : new Set<string>();
     for (const surface of surfaces) {
-      const waiting = open.has(surface);
+      const waiting = open.has(surface) || menus.has(surface);
       let state = states.get(surface);
       if (!state && !waiting) continue;
       if (!state) states.set(surface, state = { open: true, since: Date.now(), applied: false });
@@ -123,7 +217,7 @@ export function questionWatcher(rpc: Rpc, log: (line: string) => void) {
       if (!pair) continue;
       const { term, page } = pair;
       const g = await geometry(rpc, term, page);
-      if (!g || waitingQuestions(new Set([surface]), true).has(surface) !== waiting) continue;
+      if (!g || (menus.has(surface) || (enabled && waitingQuestions(new Set([surface]), true).has(surface))) !== waiting) continue;
       if (waiting) {
         const amount = Math.min(800, Math.round(g.total * 0.6 - g.size));
         if (amount < 1) continue;
@@ -146,7 +240,7 @@ export function startTabs() {
   for (const [key, value] of Object.entries(process.env)) if (value && (/^(HOME|USER|PATH|TMPDIR|LANG|CLAUDE_CONFIG_DIR|CODEX_HOME)$/.test(key) || /^(ORCA_CHAT_|CMUX_SOCKET|CMUX_BUNDLED_CLI_PATH)/.test(key))) env[key] = value;
   ensureStateDir();
   const log = openSync(join(STATE_DIR, "tabs.log"), "a", 0o600);
-  const child = spawn("/usr/bin/lockf", ["-k", "-s", "-t", "0", join(STATE_DIR, "tabs.lock"), process.execPath, import.meta.path], { cwd: "/", env, detached: true, stdio: ["ignore", log, log] });
+  const child = spawn("/usr/bin/lockf", ["-k", "-s", "-t", "0", join(STATE_DIR, "tabs.lock"), join(DATA_DIR, "bun-1.3.14/package/bin/bun"), import.meta.path], { cwd: "/", env, detached: true, stdio: ["ignore", log, log] });
   child.on("error", () => {});
   child.unref();
 }
@@ -187,14 +281,14 @@ if (import.meta.main) run(async () => {
   // Our own selections make events too. They are known by tab and time, so a pick of
   // the user in that moment still counts.
   const ours: { id: string; from: number; to: number }[] = [];
-  async function select(t: Tab) {
+  async function select(t: Tab, mutate: Rpc) {
     const mine = { id: t.id, from: Date.now() - 5, to: Infinity };
     ours.push(mine);
     if (ours.length > 50) ours.shift();
-    await selectTab(rpc, t).finally(() => (mine.to = Date.now() + 150));
+    await selectTab(mutate, t).finally(() => (mine.to = Date.now() + 150));
   }
 
-  async function pair(workspace: string, picked: string) {
+  async function pair(workspace: string, picked: string, mutate: Rpc) {
     const fresh = !known.has(picked), quiet = Date.now() - (moved.get(workspace) ?? 0) > 2_000;
     const all = await read(workspace), pages = pagesOf(all, workspace), hit = all.find((t) => t.id === picked);
     if (pages.length < 2 || !hit) return;
@@ -208,16 +302,16 @@ if (import.meta.main) run(async () => {
     if (page.id !== hit.id) {
       // A read is up to a second old, so it is only believed when nothing has moved.
       if (quiet && page.selected && terminal.id === hit.id) return;
-      await select(page);
+      await select(page, mutate);
       if (picks.has(workspace)) return; // the user has picked another tab since
     }
-    await select(terminal); // the page is read-only
+    await select(terminal, mutate); // the page is read-only
   }
 
   // Closes the pages of terminals that are gone. A terminal can be out of the list for
   // a moment, for example when it moves, so two reads must agree, in the same cmux.
   const closingPages = new Set<string>();
-  async function close(all: Tab[]) {
+  async function close(all: Tab[], mutate: Rpc) {
     const gone = (tabs: Tab[]) => tabs.filter((p) => p.chat && seen.has(p.chat) && tabs.some(t => t.workspace === p.workspace && !t.chat) && pagesOf(tabs, p.workspace).length > 1 && !tabs.some((t) => t.id === p.chat));
     const first = gone(all);
     if (!first.length) return;
@@ -229,9 +323,9 @@ if (import.meta.main) run(async () => {
       if (low(list.workspace_id) !== page.workspace || list.surfaces.some((s: any) => low(s.id) === page.chat)) continue;
       // First the panes: cmux must not select a page for us.
       const stay = again.find((t) => t.workspace === page.workspace && t.type === "terminal" && t.selected && again.some((p) => p.chat === t.id));
-      if (page.selected && stay) await pair(page.workspace, stay.id);
+      if (page.selected && stay) await pair(page.workspace, stay.id, mutate);
       if (closeWithPage) closingPages.add(page.id);
-      await rpc("surface.close", { workspace_id: page.workspace, surface_id: page.id });
+      await mutate("surface.close", { workspace_id: page.workspace, surface_id: page.id });
     }
   }
 
@@ -250,7 +344,7 @@ if (import.meta.main) run(async () => {
     return remaining.length === 1 && remaining[0].type === "terminal" && remaining[0].id === page.chat && !tabs.some(t => t.chat === page.chat);
   }
 
-  async function confirmPageCloses(all: Tab[], pending: PendingClose[]) {
+  async function confirmPageCloses(all: Tab[], pending: PendingClose[], mutate: Rpc) {
     for (const candidate of pending) {
       const { page, since } = candidate;
       if (!terminalAlone(all, page)) {
@@ -266,7 +360,7 @@ if (import.meta.main) run(async () => {
       closedPages.delete(page.id);
       if (JSON.parse(await cmux(["events", "--snapshot"])).boot_id !== boot) stop("another cmux");
       if (terminalAlone(await read(), page)) {
-        await rpc("workspace.close", { workspace_id: page.workspace });
+        await mutate("workspace.close", { workspace_id: page.workspace, force: true }); // the agent still runs, so cmux asks first
         log("closed chat workspace " + page.workspace + " after its page was closed");
       }
     }
@@ -283,7 +377,7 @@ if (import.meta.main) run(async () => {
     for (const t of all) if (!t.chat || ids.has(t.chat) || !seen.has(t.chat)) candidates.delete(t.workspace);
     return candidates;
   }
-  async function closeWorkspaces(all: Tab[]) {
+  async function closeWorkspaces(all: Tab[], mutate: Rpc) {
     if (!boot) return;
     const candidates = leftovers(all), now = Date.now();
     for (const id of waiting.keys()) if (!candidates.has(id)) waiting.delete(id);
@@ -293,7 +387,7 @@ if (import.meta.main) run(async () => {
       else if (now - since >= 1500) {
         if (JSON.parse(await cmux(["events", "--snapshot"])).boot_id !== boot) stop("another cmux");
         if (leftovers(await read()).has(id)) {
-          await rpc("workspace.close", { workspace_id: id });
+          await mutate("workspace.close", { workspace_id: id });
           log("closed leftover chat workspace " + id);
         }
         waiting.delete(id);
@@ -307,7 +401,7 @@ if (import.meta.main) run(async () => {
   // A page with another name than the one we gave it was renamed by the user: that name goes
   // to the terminal tab, where the agent cannot replace it.
   const named = new Map<string, { title: string; at: number }>();
-  async function name(all: Tab[]) {
+  async function name(all: Tab[], mutate: Rpc) {
     for (const page of all.filter((t) => t.chat && pagesOf(all, t.workspace).length > 1)) {
       const terminal = all.find((t) => t.type === "terminal" && t.id === page.chat);
       let title = terminal?.title.trim().slice(0, 80);
@@ -321,43 +415,98 @@ if (import.meta.main) run(async () => {
       const byUser = last && page.title !== last.title && now - last.at > 3_000 && page.title.trim() && !/^(Chat(:|$)|https?:|127\.)/.test(page.title);
       if (byUser) title = page.title;
       named.set(page.id, { title, at: now });
-      await rpc("surface.action", { action: "rename", workspace_id: page.workspace, surface_id: byUser ? terminal.id : page.id, title });
+      await mutate("surface.action", { action: "rename", workspace_id: page.workspace, surface_id: byUser ? terminal.id : page.id, title });
     }
   }
 
   let written = "", questionBusy = false;
   let questionTabs: Tab[] = [];
-  const questions = questionWatcher(rpc, line => console.error(new Date().toISOString(), line));
+  const questions = questionWatcher(rpc, line => console.error(new Date().toISOString(), line), cmux);
   setInterval(async () => {
-    if (questionBusy || !questionTabs.length) return;
+    if (questionBusy) return;
     questionBusy = true;
     try { await questions(questionTabs); } catch (error: any) { log(error?.message ?? "Question check failed"); }
     finally { questionBusy = false; }
   }, 250);
-  async function list(all: Tab[]): Promise<Project[]> {
+  let cached: { at: number; all: Tab[]; projects: Project[] } | undefined;
+  async function list(all: Tab[], at: number): Promise<Project[]> {
     questionTabs = all;
     const projects = await readProjects(rpc, all), text = JSON.stringify({ pid: process.pid, projects });
     if (text !== written) writePrivate(CHATS_FILE, text);
+    cached = { at, all, projects };
     written = text;
     return projects;
   }
 
+  const titleAttempts = new Map<string, number>();
+  let lastWindow = "";
+  async function nameWorkspaces(projects: Project[], all: Tab[], mutate: Rpc) {
+    const now = Date.now();
+    for (const [id, at] of titleAttempts) if (now - at >= 300_000) titleAttempts.delete(id);
+    const chats = projects.flatMap(p => p.chats).filter(c => /^(Claude|Codex) \+ chat$/.test(c.title) && !titleAttempts.has(c.workspace));
+    if (!chats.length) return;
+    // workspace.list covers one window. Give each window a turn.
+    const ids = new Set(chats.map(c => c.workspace));
+    const windows = [...new Set(all.filter(t => ids.has(t.workspace)).map(t => t.window))].sort();
+    lastWindow = windows.find(id => id > lastWindow) ?? windows[0];
+    const { workspaces } = await rpc("workspace.list", { window_id: lastWindow });
+    let index: ReturnType<typeof codexTitles> | undefined;
+    for (const w of workspaces) {
+      const chat = chats.find(c => c.workspace === low(w.id));
+      if (!chat || w.title !== chat.title || !(Date.parse(w.latest_submitted_at) <= now - 60_000)) continue;
+      titleAttempts.set(chat.workspace, Date.now());
+      const agent = chat.title === NEW_CHAT ? "claude" : "codex";
+      let title: unknown;
+      try {
+        const store = readStore(agent), id = store.activeSessionsBySurface[chat.terminal]?.sessionId;
+        if (!id || !store.sessions[id]?.transcriptPath) continue;
+        title = agent === "claude" ? claudeTitle(store.sessions[id].transcriptPath) : shortTitle((index ??= codexTitles()).get(id));
+      } catch { continue; }
+      if (!validTitle(title)) continue;
+      await mutate("workspace.rename", { workspace_id: chat.workspace, title });
+      log(`named chat workspace ${chat.workspace} from its ${agent} session title`);
+    }
+  }
+
   // A pick in the strip. The click gave the focus to the page, and typing must go to the
   // terminal when the user comes back, so that pane gets it first.
-  async function open({ from, to }: { from: string; to: string }) {
-    const all = await read(), project = (await list(all)).find((p) => p.chats.some((c) => c.terminal === from));
-    const chat = project?.chats.find((c) => c.terminal === to);
-    if (!project || !(chat || (to === "new" && project.folder))) return;
-    const focus = async (terminal: string) => {
-      const pane = all.find((t) => t.id === terminal)?.pane, shown = all.find((t) => t.pane === pane && t.selected);
-      if (shown) await selectTab(rpc, shown);
+  async function open({ from, to }: { from: string; to: string }, mutate: Rpc) {
+    if (to === from) {
+      const pair = pairFor(await read(), from);
+      if (!pair) return "skipped: no paired terminal";
+      await selectTab(mutate, pair.term);
+      return "focus";
+    }
+    const resolve = (all: Tab[], projects: Project[]) => {
+      const project = projects.find(p => p.chats.some(c => c.terminal === from));
+      const chat = project?.chats.find(c => c.terminal === to);
+      const term = (id: string) => all.find(t => t.id === id && t.type === "terminal");
+      return { project, source: term(from), target: chat && term(chat.terminal) };
     };
-    await focus(from);
-    if (to === from) return;
-    if (chat) await focus(to);
-    const workspace_id = chat?.workspace ?? (await rpc("workspace.create", { title: NEW_CHAT, title_source: "auto", cwd: project.folder, layout: command().workspace.layout, group_id: project.id, group_placement: "end", focus: false })).workspace_id;
-    await rpc("workspace.select", { workspace_id });
+    const at = Date.now();
+    let pick = cached && at - cached.at < 2_000 ? resolve(cached.all, cached.projects) : undefined;
+    if (!pick?.source || !pick.project || !(pick.target || (to === "new" && pick.project.folder))) {
+      const all = await read();
+      pick = resolve(all, await list(all, at));
+    }
+    const { project, source, target } = pick;
+    if (!project || !source || !(target || (to === "new" && project.folder))) return "skipped: no matching project chat";
+    await selectTab(mutate, source);
+    if (target) await selectTab(mutate, target);
+    const workspace_id = target?.workspace ?? (await mutate("workspace.create", { title: NEW_CHAT, title_source: "auto", cwd: project.folder, layout: command().workspace.layout, group_id: project.id, group_placement: "end", focus: false })).workspace_id;
+    await mutate("workspace.select", { workspace_id });
+    return "selected";
   }
+  let closeAt = Date.now(), tabClose: { workspace: string; terminal: string } | undefined;
+  setInterval(() => {
+    let request;
+    try { request = JSON.parse(readFileSync(CLOSE_FILE, "utf8")); } catch { return; }
+    if (!request || !(request.at > closeAt) || !UUID.test(request.workspace) || !UUID.test(request.terminal)) return;
+    closeAt = request.at;
+    tabClose = request;
+    work();
+  }, 100);
+
   let asked = Date.now(), wish: { from: string; to: string; at: number } | undefined;
   setInterval(() => {
     let now: typeof wish;
@@ -377,20 +526,56 @@ if (import.meta.main) run(async () => {
     work();
   }, 100);
 
-  // One thing at a time: picks first, then the list, then the sweep.
+  // Handle strip actions before the next sweep.
   let busy = false, due = true, stale = false, fails = 0, silentSince = 0;
+  // A step that never ends would keep every later pick waiting, so a watchdog frees the loop.
+  let round = 0, step = "", stepAt = 0;
+  setInterval(() => {
+    if (!busy || Date.now() - stepAt < 15_000) return;
+    log(`stuck for ${Math.round((Date.now() - stepAt) / 1000)} s in ${step}, starting again`);
+    round++;
+    busy = false;
+    work();
+  }, 5_000);
   async function work() {
     if (busy) return;
     busy = true;
-    while (wish || rename || picks.size || stale || due) {
+    const mine = ++round;
+    const mutate: Rpc = async (method, params) => {
+      if (round !== mine) return refuse("watchdog replaced this round");
+      return rpc(method, params);
+    };
+    while (round === mine && (tabClose || wish || rename || picks.size || stale || due)) {
+      step = tabClose ? "close" : rename ? "rename" : wish ? "pick" : picks.size ? "pair" : "sweep";
+      const started = stepAt = Date.now();
+      if (tabClose) {
+        const { workspace, terminal } = tabClose;
+        tabClose = undefined;
+        try {
+          const all = await read(), projects = await list(all, started);
+          if (projects.some(p => p.chats.some(c => c.workspace === workspace && c.terminal === terminal))) {
+            const page = all.find(t => t.workspace === workspace && t.chat === terminal);
+            if (closeWithPage && page) closingPages.add(page.id);
+            try {
+              await mutate("workspace.close", { workspace_id: workspace, force: true });
+            } catch (err) {
+              if (page) closingPages.delete(page.id);
+              throw err;
+            }
+            log("closed chat workspace " + workspace + " from its tab");
+            stale = true;
+          }
+        } catch (err: any) { log(err?.message ?? String(err)); }
+        continue;
+      }
       if (rename) {
         const { workspace, title } = rename;
         rename = undefined;
         try {
-          const projects = await list(await read());
+          const projects = await list(await read(), started);
           if (projects.some(p => p.chats.some(c => c.workspace === workspace))) {
             // cmux workspace.rename uses setCustomTitle with its default user source.
-            await rpc("workspace.rename", { workspace_id: workspace, title });
+            await mutate("workspace.rename", { workspace_id: workspace, title });
             stale = true;
           }
         } catch (err: any) { log(err?.message ?? String(err)); }
@@ -404,18 +589,23 @@ if (import.meta.main) run(async () => {
       else if (only) stale = false;
       else if (!strip) due = false;
       try {
-        if (strip) await open(strip);
-        else if (pick) await pair(...pick);
+        if (strip) {
+          // Each pick from the strip leaves one line, so a click that does nothing can be traced.
+          const t0 = Date.now(), waited = t0 - strip.at, how = await open(strip, mutate);
+          if (how !== "focus" || Date.now() - t0 > 500) log(`pick ${strip.from.slice(0, 8)} -> ${strip.to.slice(0, 8)}: ${how}, waited ${waited} ms, took ${Date.now() - t0} ms`);
+        }
+        else if (pick) await pair(...pick, mutate);
         else {
           const pending = [...closedPages.values()];
           const all = await read();
           fails = 0; silentSince = 0;
-          await confirmPageCloses(all, pending);
-          await list(all);
-          await closeWorkspaces(all);
+          await confirmPageCloses(all, pending, mutate);
+          const projects = await list(all, started);
+          await closeWorkspaces(all, mutate);
           if (!only) {
-            await name(all);
-            if (boot) await close(all);
+            await name(all, mutate);
+            if (boot) await close(all, mutate);
+            await nameWorkspaces(projects, all, mutate);
           }
         }
       } catch (err: any) {
@@ -425,19 +615,17 @@ if (import.meta.main) run(async () => {
         if (!strip && !pick && !only && ++fails >= 3) {
           silentSince ||= Date.now();
           if (Date.now() - silentSince > 120_000) stop("cmux does not answer");
-          log("cmux is slow, trying again in 5 s");
-          await Bun.sleep(5_000);
-          due = true;
+          log("cmux is slow, trying again on the next sweep");
         }
       }
     }
-    busy = false;
+    if (round === mine) busy = false;
   }
   const sweep = () => ((due = true), work());
   setInterval(sweep, SWEEP);
 
   // The list follows the events. A read can be a second old, so it is read two times.
-  const LISTED = /^(surface\.(created|closed|action|moved)|workspace\.(created|closed|renamed|action|reordered)|notification\.)/;
+  const LISTED = /^(surface\.(created|closed|action|moved)|workspace\.(created|closed|renamed|action|reordered|selected)|notification\.)/;
   let soon: Timer | undefined, later: Timer | undefined;
   const relist = () => ((stale = true), work());
   function changed() {

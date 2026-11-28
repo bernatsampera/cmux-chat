@@ -9,7 +9,7 @@
 
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { appendFileSync, existsSync, mkdtempSync, mkdirSync, realpathSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdtempSync, mkdirSync, realpathSync, readFileSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -57,7 +57,7 @@ function line(type: string, item: object, sessionId = session) { return JSON.str
 function question(id: string) { writeFileSync(transcript, line("assistant", ask(id))); }
 function answer(id: string) { appendFileSync(transcript, line("user", { type: "tool_result", tool_use_id: id })); }
 const { readTabs, questionWatcher } = await import("../lib/tabs");
-const { waitingQuestions } = await import("../lib/follow");
+const { followSurface, PAGE, waitingQuestions } = await import("../lib/follow");
 const isOpen = () => waitingQuestions(new Set([surface])).has(surface);
 const page = "http://127.0.0.1:47739/" + token + "/follow?cmux=" + surface;
 let height = 120, horizontal = false, selected = surface, sibling = true;
@@ -138,18 +138,33 @@ try {
   });
   await check("Q01 Q07 Q08 the running helper grows and restores with a frozen idle session file", async () => {
     const cli = join(dir, "fake-cmux"), trace = join(dir, "daemon-calls.jsonl"), logFile = join(dir, "tabs.log");
-    writeFileSync(join(dir, "tree.json"), JSON.stringify(await rpc("system.tree", {})));
+    const tree = await rpc("system.tree", {});
+    const visible = tree.windows[0].workspaces[0], hidden = structuredClone(visible);
+    visible.selected = true; hidden.selected = false; hidden.id = crypto.randomUUID();
+    const hiddenId = hidden.panes[0].surfaces[0].id = crypto.randomUUID();
+    hidden.panes[1].surfaces[0].url = page.replace(surface, hiddenId);
+    tree.windows[0].workspaces.push(hidden);
+    writeFileSync(join(dir, "tree.json"), JSON.stringify(tree));
+    const screen = (text: string) => writeFileSync(join(dir, "screen"), text);
+    const normal = ["Esc to cancel", ...Array(12).fill("output"), "esc to interrupt", "shift+tab to cycle", "? for shortcuts"].join("\n");
+    screen(normal);
     writeFileSync(cli, `#!${process.execPath}
 import fs from "node:fs";
 const [verb, method] = process.argv.slice(2);
 if (verb === "events") {
   if (method === "--snapshot") console.log('{"boot_id":"test"}');
   else setInterval(() => {}, 1000);
+} else if (verb === "read-screen") {
+  const args = process.argv.slice(2);
+  const screen = fs.readFileSync("screen", "utf8");
+  fs.appendFileSync("daemon-calls.jsonl", JSON.stringify({method:verb,args,at:Date.now(),screen}) + "\\n");
+  if (screen === "failed") process.exit(1);
+  console.log(screen);
 } else {
   const p = JSON.parse(await Bun.stdin.text());
   const tree = JSON.parse(fs.readFileSync("tree.json"));
   const w = tree.windows[0].workspaces[0];
-  fs.appendFileSync("daemon-calls.jsonl", JSON.stringify({method, p}) + "\\n");
+  fs.appendFileSync("daemon-calls.jsonl", JSON.stringify({method, p, at:Date.now()}) + "\\n");
   let reply = {};
   if (method === "system.tree") reply = tree;
   else if (method === "workspace.group.list") reply = {groups: []};
@@ -169,22 +184,92 @@ if (verb === "events") {
     }
     status("idle");
     writeFileSync(transcript, "");
-    const helper = Bun.spawn([process.execPath, join(import.meta.dir, "../lib/tabs.ts")], {cwd: dir,
+    const launch = (picker: string) => Bun.spawn([process.execPath, join(import.meta.dir, "../lib/tabs.ts")], {cwd: dir,
       env: { HOME: dir, PATH: "/usr/bin:/bin", ORCA_CHAT_STATE_DIR: dir, CLAUDE_CONFIG_DIR: dir,
+        ORCA_CHAT_PICKER_RESIZE: picker, ORCA_CHAT_QUESTION_RESIZE: "1",
         CODEX_HOME: process.env.CODEX_HOME, CMUX_BUNDLED_CLI_PATH: cli, CMUX_SOCKET_PATH: join(dir, "unused.sock") },
       stdin: "ignore", stdout: "ignore", stderr: Bun.file(logFile) });
+    let helper = launch("1");
+    const reads = () => daemonCalls().filter(c => c.method === "read-screen");
+    const moves = () => daemonCalls().filter(c => c.method === "pane.resize");
+    const menuIds = () => JSON.parse(readFileSync(join(dir, "menus.json"), "utf8")).terminals;
     try {
       await waitFor(() => existsSync(join(dir, "chats.json")));
+      await check("M03 normal input and old menu hints leave the pane alone", async () => {
+        await waitFor(() => reads().length >= 3);
+        assert.equal(moves().length, 0);
+      });
       question("daemon");
       await waitFor(() => daemonCalls().some(c => c.method === "pane.resize"));
       answer("daemon");
       await waitFor(() => daemonCalls().filter(c => c.method === "pane.resize").length >= 2);
-      const moves = daemonCalls().filter(c => c.method === "pane.resize");
-      assert.deepEqual(moves.map(c => [c.p.pane_id, c.p.direction, c.p.amount]), [[termPane,"up",480],[pagePane,"down",480]]);
-      assert.equal(daemonCalls().filter(c => !["system.tree","pane.list","workspace.group.list","notification.list","pane.resize"].includes(c.method)).length, 0);
+      assert.deepEqual(moves().map(c => [c.p.pane_id, c.p.direction, c.p.amount]), [[termPane,"up",480],[pagePane,"down",480]]);
+      assert.equal(daemonCalls().filter(c => !["system.tree","pane.list","workspace.group.list","notification.list","pane.resize","read-screen"].includes(c.method)).length, 0);
       const log = readFileSync(logFile, "utf8");
       assert.ok(log.includes("grow " + surface + " up 480"));
       assert.ok(log.includes("shrink " + surface + " down 480"));
+      const menu = "Choose effort\n↑↓ navigate · Enter/↓ select · Esc to cancel";
+      await check("M01 a stable menu grows once and appears in the private menu file", async () => {
+        screen(menu);
+        await waitFor(() => moves().length === 3);
+        assert.ok(moves()[2].at - reads().find(c => c.screen === menu).at >= 400);
+        assert.equal(readFileSync(join(dir, "height"), "utf8"), "600");
+        assert.deepEqual(menuIds(), [surface]);
+        assert.equal(statSync(join(dir, "menus.json")).mode & 0o777, 0o600);
+      });
+      await check("M06 the follow state shows the menu footer over busy and done", async () => {
+        const footer = { className: "", textContent: "" };
+        const draw = new Function("document", "s", PAGE.slice(PAGE.indexOf("function words(s)"), PAGE.indexOf("// The other chats")) + "state(s)");
+        for (const activity of ["busy", "idle"]) {
+          status(activity);
+          const state = await followSurface(surface);
+          assert.equal(state.menu, true);
+          draw({ getElementById: () => footer }, state);
+          assert.deepEqual(footer, { className: "ask", textContent: "? A menu is open in the terminal below" });
+        }
+      });
+      await check("M04 failed reads and an overlapping question keep one growth", async () => {
+        screen("failed");
+        await waitFor(() => reads().filter(c => c.screen === "failed").length >= 3);
+        assert.deepEqual(menuIds(), [surface]);
+        question("both"); screen(menu);
+        const before = reads().length;
+        await waitFor(() => reads().length >= before + 3);
+        screen(normal);
+        await waitFor(() => !menuIds().length);
+        await Bun.sleep(650);
+        assert.equal(moves().length, 3);
+        answer("both");
+        await waitFor(() => moves().length === 4);
+      });
+      await check("M02 closing a menu alone restores the original size after debounce", async () => {
+        screen(menu); await waitFor(() => moves().length === 5);
+        const at = Date.now();
+        screen(normal); await waitFor(() => moves().length === 6);
+        assert.ok(moves()[5].at - at >= 400);
+        assert.equal(readFileSync(join(dir, "height"), "utf8"), "120");
+        assert.deepEqual(menuIds(), []);
+        assert.equal((await followSurface(surface)).menu, undefined);
+      });
+      await check("M05 only the visible pair is read and reads are spaced apart", () => {
+        const history = reads();
+        for (const [i, c] of history.entries()) {
+          assert.deepEqual(c.args, ["read-screen", "--surface", surface, "--lines", "20"]);
+          if (i) assert.ok(c.at - history[i - 1].at >= 400);
+        }
+      });
+      await check("M07 disabling picker resizing skips reads and growth", async () => {
+        screen(menu); await waitFor(() => moves().length === 7);
+        helper.kill(); await helper.exited;
+        assert.equal((await followSurface(surface)).menu, undefined);
+        const before = reads().length;
+        writeFileSync(join(dir, "height"), "120");
+        helper = launch("0");
+        await waitFor(() => JSON.parse(readFileSync(join(dir, "chats.json"), "utf8")).pid === helper.pid);
+        await Bun.sleep(1400);
+        assert.equal(reads().length, before);
+        assert.equal(moves().length, 7);
+      });
     } finally { helper.kill(); await helper.exited; }
   });
 } finally {

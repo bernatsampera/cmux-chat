@@ -16,7 +16,9 @@ export const CODEX_DIR = process.env.CODEX_HOME || join(homedir(), ".codex");
 
 // lib/tabs.ts writes the chats of each project here, lib/follow.ts what was picked in the strip.
 export const CHATS_FILE = join(STATE_DIR, "chats.json");
+export const MENUS_FILE = join(STATE_DIR, "menus.json");
 export const PICK_FILE = join(STATE_DIR, "pick.json");
+export const CLOSE_FILE = join(STATE_DIR, "close.json");
 export const RENAME_FILE = join(STATE_DIR, "rename.json");
 export const validTitle = (title: unknown): title is string => typeof title === "string" && title.length <= 80 && Boolean(title.trim());
 export interface Chat { workspace: string; terminal: string; title: string; agent?: Agent; unread: boolean }
@@ -82,10 +84,16 @@ export function writeStore(agent: Agent, store: Store) {
   writePrivate(storePath(agent), JSON.stringify(store, null, 1) + "\n");
 }
 
-export const sh = (cmd: string, ...args: string[]) => spawnSync(cmd, args, { encoding: "utf8", maxBuffer: 16 << 20 }).stdout ?? "";
+const processOptions = { encoding: "utf8", timeout: 3_000, killSignal: "SIGKILL" } as const;
+const timedOut = (error?: Error) => (error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
+export function sh(cmd: string, ...args: string[]) {
+  const res = spawnSync(cmd, args, { ...processOptions, maxBuffer: 16 << 20 });
+  return timedOut(res.error) ? "" : res.stdout ?? "";
+}
 
 export function ps(pid: number, field: string, flag = "-ww"): string {
-  const res = spawnSync("/bin/ps", [flag, "-o", `${field}=`, "-p", String(pid)], { encoding: "utf8", env: { LC_ALL: "C", TZ: "UTC0", PATH: "/bin:/usr/bin" } });
+  const res = spawnSync("/bin/ps", [flag, "-o", `${field}=`, "-p", String(pid)], { ...processOptions, env: { LC_ALL: "C", TZ: "UTC0", PATH: "/bin:/usr/bin" } });
+  if (timedOut(res.error)) return "";
   if (res.status === null) refuse("ps is not usable here, so the agent process cannot be checked");
   return res.status === 0 ? res.stdout.trim() : "";
 }

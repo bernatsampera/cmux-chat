@@ -14,7 +14,7 @@ const SERVER_FILE = join(STATE_DIR, "server.json"); // written by the server
 const LAUNCH_FILE = join(STATE_DIR, "launch.json"); // written by us
 const LOG_FILE = join(STATE_DIR, "server.log");
 const PORT = Number(process.env.ORCA_CHAT_PORT || json(SERVER_FILE)?.port || 47739);
-const CODE = new Bun.CryptoHasher("sha256").update(["chat.ts", "common.ts", "follow.ts", "guard.ts", "live.ts", "queue.ts", "page/ui.js", "page/ui.css", "page/look.js", "page/look.css"].map((file) => readFileSync(join(HERE, file), "utf8")).join("\0")).digest("hex");
+const CODE = new Bun.CryptoHasher("sha256").update(["chat.ts", "common.ts", "follow.ts", "guard.ts", "live.ts", "queue.ts", "commands.ts", "page/ui.js", "page/ui.css", "page/look.js", "page/look.css"].map((file) => readFileSync(join(HERE, file), "utf8")).join("\0")).digest("hex");
 
 function json(path: string): any {
   try {

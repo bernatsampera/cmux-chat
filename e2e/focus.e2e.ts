@@ -4,6 +4,7 @@
 // Quick clicks in either document bypass the shared 400 ms limit.
 // An unrelated window, foreign origin or hidden frame can pick a terminal.
 // A click on a tab picks twice or steals focus from the rename field.
+// A hidden page skips preload, reloads on switch, or blanks the old chat before messages arrive.
 
 import assert from "node:assert/strict";
 import { runInNewContext } from "node:vm";
@@ -13,25 +14,41 @@ import { join } from "node:path";
 
 const dir = mkdtempSync(join(tmpdir(), "cmux-focus-"));
 const dom = join(dir, "dom.mjs");
-writeFileSync(dom, 'export { JSDOM } from "jsdom@26.1.0";');
-const { JSDOM } = await import(dom);
+writeFileSync(dom, 'export { JSDOM, ResourceLoader } from "jsdom@26.1.0";');
+const { JSDOM, ResourceLoader } = await import(dom);
 const me = crypto.randomUUID(), base = "http://localhost/focus-test/follow?cmux=" + me;
 process.env.ORCA_CHAT_STATE_DIR = dir;
 process.env.CMUX_AGENT_CHAT_TOKEN = "focus-test";
 let route: (req: Request) => Promise<Response>;
 Bun.serve = ((options: any) => { route = options.fetch; }) as any;
 await import("../lib/guard");
-Bun.serve({ fetch: () => new Response("<head></head>", { headers: { "content-type": "text/html" } }) });
+Bun.serve({ fetch: req => {
+  const first = req.url.endsWith("/t-first");
+  const head = first ? "" : '<link rel="stylesheet" href="slow.css">';
+  const turn = first ? '<div class="turn-group">First message</div>' : "";
+  return new Response('<head>' + head + '</head><body><div class="turn-list">' + turn + '</div></body>', { headers: { "content-type": "text/html" } });
+} });
 const get = async (url: string) => (await route(new Request(url, { headers: { host: "localhost" } }))).text();
 const follow = await get(base);
-const results: { name: string; error?: string }[] = [];
+const results: { name: string; error?: string; switchMs?: number }[] = [];
 async function check(name: string, test: () => void) {
   try { test(); results.push({ name }); }
   catch (error) { results.push({ name, error: String(error) }); }
 }
 
-const win = new JSDOM(follow, { url: base, pretendToBeVisual: true }).window;
+const requests: string[] = [];
+let finishStyle: () => void;
+class Resources extends ResourceLoader {
+  fetch(url: string) {
+    if (url.endsWith("/slow.css")) return new Promise(resolve => { finishStyle = () => resolve(Buffer.from("")); });
+    requests.push(url);
+    return get(url).then(html => Buffer.from(html));
+  }
+}
+const win = new JSDOM(follow, { url: base, pretendToBeVisual: true, resources: new Resources() }).window;
 const doc = win.document;
+let visibility = "hidden", polls = 0;
+Object.defineProperty(doc, "visibilityState", { get: () => visibility });
 win.HTMLElement.prototype.scrollIntoView = () => {};
 let now = 0, session = "first";
 const timers = new Map<number, { at: number; fn: Function }>();
@@ -58,9 +75,10 @@ function advance(ms: number) {
 }
 const picks: string[] = [];
 win.fetch = async (path: string, options: any) => {
-  if (path.startsWith("follow/state")) return { ok: true, json: async () => ({
-    session, chats: [me, "other"].map(id => ({ id, title: id })),
-  }) };
+  if (path.startsWith("follow/state")) {
+    polls++;
+    return { ok: true, json: async () => ({ session, chats: [me, "other"].map(id => ({ id, title: id })) }) };
+  }
   const url = new URL(path, base);
   assert.equal(url.pathname, "/focus-test/follow/pick");
   assert.equal(url.searchParams.get("cmux"), me);
@@ -72,14 +90,38 @@ const context = (w: any) => ({ document: w.document, window: w, parent: w.parent
 runInNewContext(doc.querySelector("script").textContent, context(win));
 await Bun.sleep(0);
 const frame = doc.querySelector("iframe");
-frame.onload();
+await check("hidden page requests and loads the chat on its first poll", () => {
+  assert.equal(frame?.contentDocument.readyState, "complete");
+  assert.equal(frame.className, "on");
+  assert.deepEqual(requests, [frame.src]);
+  assert.equal(frame.contentDocument.querySelector(".turn-group").textContent, "First message");
+});
+advance(4999);
+const beforeHiddenPoll = polls;
+advance(1);
+await Bun.sleep(0);
+await check("hidden page polls again after 5 seconds", () => {
+  assert.equal(beforeHiddenPoll, 1);
+  assert.equal(polls, 2);
+});
+visibility = "visible";
+const switched = performance.now();
+doc.dispatchEvent(new win.Event("visibilitychange"));
+const visibleMessage = doc.querySelector("iframe.on")?.contentDocument.querySelector(".turn-group")?.textContent;
+const switchMs = performance.now() - switched;
+await Bun.sleep(0);
+await check("visible page immediately shows the preloaded message without another frame request", () => {
+  assert.equal(visibleMessage, "First message");
+  assert.equal(polls, 3);
+  assert.deepEqual(requests, [frame.src]);
+  assert.equal(doc.querySelector("iframe.on"), frame);
+});
+results.at(-1)!.switchMs = switchMs;
 const chat = frame.contentWindow;
 assert.equal(chat.location.origin, win.location.origin);
 clock(chat);
-const chatHtml = await get(frame.src);
-const source = new JSDOM(chatHtml).window.document.querySelector("#cmux-chat-focus")?.textContent;
-const body = chat.document.createElement("body");
-chat.document.appendChild(chat.document.createElement("html")).append(body);
+const source = chat.document.querySelector("#cmux-chat-focus")?.textContent;
+const body = chat.document.body;
 body.innerHTML = '<p>select this word</p><a><i></i></a><button></button><button class="cc-copy"><b></b></button><summary></summary><input><textarea></textarea><select></select><label></label><div contenteditable></div><div role="button"></div><div tabindex="0"></div>';
 function message(source: any, origin: string, data = { type: "orca-chat-focus" }) {
   win.dispatchEvent(new win.MessageEvent("message", { source, origin, data }));
@@ -150,7 +192,20 @@ await Bun.sleep(0);
 session = "second";
 doc.dispatchEvent(new win.Event("visibilitychange"));
 await Bun.sleep(0);
-doc.querySelectorAll("iframe")[1].onload();
+const second = doc.querySelectorAll("iframe")[1];
+await check("previous chat stays until the next chat draws a message before load", () => {
+  advance(80);
+  assert.equal(doc.querySelector("iframe.on"), frame);
+  const turn = second.contentDocument.createElement("div");
+  turn.className = "turn-group";
+  turn.textContent = "Second message";
+  second.contentDocument.querySelector(".turn-list").append(turn);
+  advance(80);
+  assert.notEqual(second.contentDocument.readyState, "complete");
+  assert.deepEqual([...doc.querySelectorAll("iframe.on")], [second]);
+});
+finishStyle();
+await Bun.sleep(0);
 await check("only the current frame and exact origin can request focus", () => {
   const current = doc.querySelectorAll("iframe")[1].contentWindow;
   message(win, win.location.origin); message(current, "https://example.org");

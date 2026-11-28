@@ -2,6 +2,8 @@
 
 Read a Claude Code or Codex conversation above its terminal in cmux. Project tabs let you switch chats, and the sidebar patches group chats by project and show their age.
 
+When Claude has background agents or MCP tasks running, the chat shows how many are still working and its tab keeps the working dot.
+
 ## Install
 
 Use an Apple silicon Mac with cmux 0.65.x, Git, curl, and Claude Code or Codex on your PATH. The installer downloads a pinned copy of Bun and the cmux chat server. Project setup uses jq and the installed cmux-sidebar sidebar. The file and worktree pickers use fzf, and the Markdown picker also uses fd.
@@ -51,11 +53,11 @@ Write a fenced `json` block with a top-level `ui` array. The chat draws the part
 
 Card status can be `fail`, `ok`, `warn`, or `info` (the default). Comparison headings default to “before” and “after”. Use backticks for inline code and double asterisks for bold. Links accept HTTP and HTTPS addresses. Hover over the block or focus its copy button to copy the original JSON.
 
-## Terminal size for Claude questions
+## Terminal size for Claude questions and menus
 
-When Claude Code opens a multiple-choice question, the terminal grows to about 60% of the split it shares with the chat. When the question closes, the helper restores the previous size if the divider is still where it left it. If you move the divider yourself, the helper keeps your size.
+When Claude Code opens a multiple-choice question or an interactive menu, the terminal grows to about 60% of the split it shares with the chat. When both are closed, the helper restores the previous size if the divider is still where it left it. If you move the divider yourself, the helper keeps your size.
 
-Set `ORCA_CHAT_QUESTION_RESIZE=0` in the helper's environment to turn off automatic resizing.
+The chat footer tells you when a menu is open. In the helper's environment, set `ORCA_CHAT_QUESTION_RESIZE=0` to turn off question resizing or `ORCA_CHAT_PICKER_RESIZE=0` to turn off menu detection and resizing.
 
 Closing the chat page also closes its workspace when it contains only that page and its terminal. Set `ORCA_CHAT_CLOSE_WITH_PAGE=0` in the helper's environment to keep the terminal open.
 

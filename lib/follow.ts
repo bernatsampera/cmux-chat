@@ -2,7 +2,7 @@
 import { closeSync, fstatSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { AGENTS, CHATS_FILE, CLAUDE_DIR, CODEX_DIR, PICK_FILE, RENAME_FILE, validTitle, Refusal, SESSION_ID, claudeLive, pidStart, processSurface, ps, readStore, sh, writePrivate, writeStore, type Agent, type Project } from "./common";
+import { AGENTS, CHATS_FILE, CLOSE_FILE, MENUS_FILE, CLAUDE_DIR, CODEX_DIR, PICK_FILE, RENAME_FILE, validTitle, Refusal, SESSION_ID, UUID, claudeLive, pidStart, processSurface, ps, readStore, sh, writePrivate, writeStore, type Agent, type Project } from "./common";
 
 interface Claim { leaf: string; agent: Agent; sessionId: string; pid: number; start: string; cwd: string; path?: string; status?: string; since?: number }
 
@@ -143,7 +143,7 @@ function bind(c: Claim, tabId: string, transcriptPath: string) {
   const mine = readStore(c.agent);
   const others = AGENTS.filter((a) => a !== c.agent).map((a) => [a, readStore(a)] as const);
   const same = mine.sessions[c.sessionId];
-  if (same?.transcriptPath === transcriptPath && same.surfaceId === c.leaf && mine.activeSessionsBySurface[c.leaf]?.sessionId === c.sessionId && !others.some(([, s]) => s.activeSessionsBySurface[c.leaf])) return;
+  if (same?.transcriptPath === transcriptPath && same.surfaceId === c.leaf && same.agentPid === c.pid && same.agentPidStart === c.start && mine.activeSessionsBySurface[c.leaf]?.sessionId === c.sessionId && !others.some(([, s]) => s.activeSessionsBySurface[c.leaf])) return;
   const updatedAt = Date.now() / 1000;
   for (const [leaf, active] of Object.entries(mine.activeSessionsBySurface)) if (active.sessionId === c.sessionId) delete mine.activeSessionsBySurface[leaf];
   mine.sessions[c.sessionId] = { sessionId: c.sessionId, surfaceId: c.leaf, tabId, cwd: c.cwd, transcriptPath, updatedAt, agentPid: c.pid, agentPidStart: c.start };
@@ -156,19 +156,35 @@ function bind(c: Claim, tabId: string, transcriptPath: string) {
   }
 }
 
-// status is the word of Claude Code for what it does (busy, idle, shell, waiting), and for Codex
-// busy, idle, or asked. No status: not known.
-interface State { session: string | null; title: string; message: string | null; status?: string; since?: number; chats?: object[]; plus?: boolean }
+type Activity = { status?: string; background?: { agents: number; mcp: number } };
+interface State extends Activity { menu?: true; session: string | null; title: string; message: string | null; since?: number; chats?: Activity[]; plus?: boolean }
 const none = (message: string | null, title = ""): State => ({ session: null, title, message });
+
+let menuCache: { modified: number; pid: number; terminals: Set<string> } | undefined;
+function hasMenu(surface: string) {
+  try {
+    const modified = statSync(MENUS_FILE).mtimeMs;
+    if (menuCache?.modified !== modified) {
+      const { pid, terminals } = JSON.parse(readFileSync(MENUS_FILE, "utf8"));
+      if (!Number.isSafeInteger(pid) || pid <= 0 || !Array.isArray(terminals)) return false;
+      menuCache = { modified, pid, terminals: new Set(terminals) };
+    }
+    if (!menuCache.terminals.has(surface)) return false;
+    process.kill(menuCache.pid, 0);
+    return true;
+  } catch { return false; }
+}
 
 const lastLog = new Map<string, string>();
 export async function followSurface(surface: string): Promise<State> {
-  const state = settle(claims(new Set([surface])), surface, ""), line = state.session ?? state.message ?? "";
+  const budget = { bytes: 4 << 20 };
+  const state = settle(claims(new Set([surface])), surface, "", budget), line = state.session ?? state.message ?? "";
   if (lastLog.get(surface) !== line) {
     lastLog.set(surface, line);
     console.log(`[orca-chat] ${new Date().toISOString()} terminal ${surface.slice(0, 8)}: ${state.session ? "session " + line.slice(0, 8) : line + why(surface)}`);
   }
-  return { ...state, ...strip(surface) };
+  if (hasMenu(surface)) state.menu = true;
+  return { ...state, ...strip(surface, state, budget) };
 }
 
 // The project of this terminal. Not known when the helper that writes it (lib/tabs.ts) is gone.
@@ -181,24 +197,37 @@ function project(surface: string): Project | undefined {
 }
 
 // The tabs of the page: the chats of the project, with what their agents do.
-const agents = new Map<string, { at: number; found: Claim[] }>();
-function strip(surface: string) {
+const agents = new Map<string, { at: number; found: Claim[] }>(), FRESH_DONE = 70_000;
+function strip(surface: string, state: State, budget: { bytes: number }) {
   const p = project(surface);
   if (!p) return { chats: [] };
   let now = agents.get(p.id);
   if (!now || Date.now() - now.at > 1_500) agents.set(p.id, (now = { at: Date.now(), found: claims(new Set(p.chats.map((c) => c.terminal))) }));
   const chats = p.chats.map((c) => {
-    const live = now!.found.find((x) => x.leaf === c.terminal);
-    return { id: c.terminal, workspace: c.workspace, title: c.title, agent: live?.agent ?? c.agent, status: live?.status, since: live?.since, unread: c.unread };
+    const live = active(now!.found.filter((x) => x.leaf === c.terminal));
+    const activity = c.terminal === surface && live?.agent === "claude" && state.session === live.sessionId ? { status: state.status, background: state.background }
+      : live && activityOf(live, budget);
+    // Claude Code tells cmux "waiting for your input" only after 60 s, so a turn that just
+    // ended counts as unread until that notice takes over.
+    const fresh = activity?.status === "idle" && Number(live?.since) > Date.now() - FRESH_DONE;
+    return { id: c.terminal, workspace: c.workspace, title: c.title, agent: live?.agent ?? c.agent, ...activity, since: live?.since, unread: c.unread || fresh };
   });
   return { chats, plus: Boolean(p.folder) };
 }
 
 // The helper does the rest: the server cannot reach cmux.
 export function pickChat(from: string, to: string): boolean {
-  const p = project(from);
-  if (!p || !(to === "new" ? p.folder : p.chats.some((c) => c.terminal === to))) return false;
+  if (from !== to) {
+    const p = project(from);
+    if (!p || !(to === "new" ? p.folder : p.chats.some((c) => c.terminal === to))) return false;
+  } else if (!UUID.test(from)) return false;
   writePrivate(PICK_FILE, JSON.stringify({ from, to, at: Date.now() }));
+  return true;
+}
+export function closeChat(from: string, to: string): boolean {
+  const chat = project(from)?.chats.find(c => c.terminal === to);
+  if (!chat) return false;
+  writePrivate(CLOSE_FILE, JSON.stringify({ workspace: chat.workspace, terminal: to, at: Date.now() }));
   return true;
 }
 export function renameChat(from: string, workspace: string, title: string | null): boolean {
@@ -229,14 +258,122 @@ function active(found: Claim[]) {
   return found[0];
 }
 
-function settle(found: Claim[], tabId: string, title: string): State {
+function settle(found: Claim[], tabId: string, title: string, budget: { bytes: number }): State {
   const c = active(found);
   if (!c && found.length) return none("More than one agent runs in this terminal.", title);
   if (!c) return none("No Claude Code or Codex session in this terminal.", title);
   const path = c.path ?? (c.agent === "claude" ? claudePath(c.sessionId) : undefined);
   if (!path) return none("The session has no transcript yet. Send a message in the terminal.", title);
   bind(c, tabId, path);
-  return { session: c.sessionId, title, message: null, status: c.status, since: c.since };
+  return { session: c.sessionId, title, message: null, ...activityOf(c, budget, path), since: c.since };
+}
+
+type TaskKind = "agents" | "mcp";
+interface TaskScan {
+  process: string; ino: number; size: number; modified: number; offset: number;
+  parts: Buffer[]; open: Map<string, TaskKind>; back: number;
+}
+const taskScans = new Map<string, TaskScan>(), TASK_TAIL = 8 << 20;
+
+function applyTaskRow(line: Buffer, open: Map<string, TaskKind>, start: number, sessionId: string) {
+  if (!["Async agent launched successfully.", "moved to the background as task", "<task-notification>", "TaskStop"].some(s => line.includes(s))) return;
+  let row;
+  try { row = JSON.parse(line.toString()); } catch { return; }
+  if (!row || (row.sessionId && row.sessionId !== sessionId)) return;
+  function notice(text: string) {
+    for (const [block] of text.matchAll(/<task-notification>[\s\S]*?<\/task-notification>/g)) {
+      const id = /<task-id>([^<]+)<\/task-id>/.exec(block)?.[1];
+      const status = /<status>([^<]+)<\/status>/.exec(block)?.[1];
+      if (id && status && status !== "running") open.delete(id);
+    }
+  }
+  const content = row.type === "queue-operation" ? row.content : row.message?.content;
+  if (typeof content === "string" && (row.type === "queue-operation" || row.type === "user")) return notice(content);
+  if (!Array.isArray(content)) return;
+  for (const item of content) {
+    if (row.type === "assistant" && item?.type === "tool_use" && item.name === "TaskStop") open.delete(item.input?.task_id);
+    if (row.type !== "user" && row.type !== "queue-operation") continue;
+    if (item?.type === "text" && typeof item.text === "string") notice(item.text);
+    if (row.type !== "user" || item?.type !== "tool_result" || row.isSidechain || !(Date.parse(row.timestamp) > start)) continue;
+    const text = typeof item.content === "string" ? item.content : Array.isArray(item.content)
+      ? item.content.filter((p: any) => p?.type === "text").map((p: any) => p.text).join("\n") : "";
+    const agent = text.includes("Async agent launched successfully.") && /^agentId:\s*([a-z0-9]+) \(/m.exec(text);
+    if (agent) open.set(agent[1], "agents");
+    const mcp = /^MCP tool "[^"\n]+" is still running[^\n]*?moved to the background as task ([a-z0-9]+)\b/m.exec(text);
+    if (mcp) open.set(mcp[1], "mcp");
+  }
+}
+
+function activityOf(c: Claim, budget: { bytes: number }, path?: string): Activity {
+  if (c.agent !== "claude" || c.status !== "idle") return { status: c.status };
+  let fd: number | undefined;
+  try {
+    path ??= claudePath(c.sessionId);
+    if (!path) return { status: c.status };
+    fd = openSync(path, "r");
+    const { ino, size, mtimeMs } = fstatSync(fd);
+    const process = c.pid + "/" + c.start;
+    let scan = taskScans.get(path);
+    if (!scan || scan.process !== process || scan.ino !== ino || size < scan.size || (size === scan.size && mtimeMs !== scan.modified)) {
+      if (taskScans.size >= 128) taskScans.delete(taskScans.keys().next().value!);
+      const back = size > TASK_TAIL ? size : 0;
+      scan = { process, ino, size, modified: mtimeMs, offset: 0, back, parts: [], open: new Map() };
+      taskScans.set(path, scan);
+    }
+    scan.size = size;
+    scan.modified = mtimeMs;
+    const start = Date.parse(c.start + " UTC");
+    // Find where to start replaying rows in order. Skipping a split row here
+    // only means replaying a little more history.
+    if (scan.back > 0 && budget.bytes > 0) {
+      const length = Math.min(scan.back, budget.bytes);
+      const pos = scan.back - length, buf = Buffer.allocUnsafe(length);
+      if (readSync(fd, buf, 0, length, pos) !== length) return { status: c.status };
+      budget.bytes -= length;
+      scan.back = pos;
+      let end = buf.lastIndexOf(10);
+      while (end > 0) {
+        const prev = buf.lastIndexOf(10, end - 1);
+        if (prev < 0 && pos > 0) break;
+        const row = buf.subarray(prev + 1, end);
+        if (row.includes('"timestamp"')) {
+          let time;
+          try { time = Date.parse(JSON.parse(row.toString()).timestamp); } catch {}
+          if (time !== undefined && time <= start) {
+            scan.offset = pos + end + 1;
+            scan.back = 0;
+            break;
+          }
+        }
+        end = prev;
+      }
+    }
+    if (scan.back) return { status: c.status };
+    const length = Math.min(size - scan.offset, budget.bytes);
+    if (length > 0) {
+      const buffer = Buffer.allocUnsafe(length);
+      const bytes = buffer.subarray(0, readSync(fd, buffer, 0, length, scan.offset));
+      budget.bytes -= length;
+      let from = 0;
+      for (let end; (end = bytes.indexOf(10, from)) !== -1; from = end + 1) {
+        const part = bytes.subarray(from, end);
+        const line = scan.parts.length ? Buffer.concat([...scan.parts, part]) : part;
+        scan.parts.length = 0;
+        applyTaskRow(line, scan.open, start, c.sessionId);
+      }
+      if (from < bytes.length) scan.parts.push(Buffer.from(bytes.subarray(from)));
+      scan.offset += bytes.length;
+    }
+    // Until we reach the end, a later row could still change the count.
+    if (scan.offset < size) return { status: c.status };
+    if (scan.open.size) {
+      const background = { agents: 0, mcp: 0 };
+      for (const kind of scan.open.values()) background[kind]++;
+      return { status: "background", background };
+    }
+    return { status: "idle" };
+  } catch { return { status: undefined }; }
+  finally { if (fd !== undefined) closeSync(fd); }
 }
 
 const questionCache = new Map<string, { stamp: string; open: boolean }>();
@@ -333,9 +470,12 @@ export const PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Cha
 iframe{position:fixed;inset:var(--bar) 0 var(--foot);width:100%;height:calc(100% - var(--bar) - var(--foot));border:0;visibility:hidden;color-scheme:light;background:var(--page)}iframe.on{visibility:visible}#note{padding:calc(32px + var(--bar)) 32px 32px}
 #bar{position:fixed;inset:0 0 auto;height:var(--bar);box-sizing:border-box;overflow:hidden;display:flex;align-items:stretch;background:#292929;font-size:13px;cursor:default;-webkit-user-select:none}#bar.tabs{border-bottom:1px solid #6272a4}
 #tabs{display:flex;min-width:0;overflow-x:auto;scrollbar-width:none}#tabs::-webkit-scrollbar{display:none}
-.tab{display:flex;align-items:center;gap:7px;flex:0 1 auto;min-width:110px;max-width:340px;box-sizing:border-box;padding:0 12px;border-right:1px solid #1d1d1d}.tab:hover,#plus:hover{background:#2a2a2a}.tab.me{background:var(--page);color:#f8f8f2;box-shadow:inset 0 2px #6272a4}
+.tab{display:flex;align-items:center;gap:7px;flex:0 1 auto;min-width:110px;max-width:340px;box-sizing:border-box;padding:0 12px;border-right:1px solid #1d1d1d}.tab,#plus{cursor:pointer;transition:background-color 120ms,color 120ms}.tab:hover,#plus:hover{background:#343434;color:#f8f8f2}.tab.me{background:var(--page);color:#f8f8f2;box-shadow:inset 0 2px #6272a4}
 .tab i{flex:none;width:14px;height:14px}.tab.claude i{background:${CLAUDE}}.tab.codex i{background:${CODEX}}.tab span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 .tab b{flex:none;display:none;width:8px;height:8px;border-radius:50%}.tab:is(.busy,.ask,.new) b{display:block}.tab.busy b{background:#ffb86c;animation:beat 1.2s infinite}.tab.new b{background:#50fa7b}.tab.new span{font-weight:700;color:#f8f8f2}.tab.read:not(.me) span{opacity:.6}
+.tab.read:not(.me):hover span{opacity:1}.tab span{transition:opacity 120ms}
+.tab button{flex:none;margin-left:auto;padding:1px 4px;border:0;border-radius:3px;background:transparent;color:inherit;font:inherit;cursor:pointer;opacity:0;pointer-events:none}
+.tab:hover button,.tab button:focus-visible,.tab button.confirm{opacity:1;pointer-events:auto}.tab button.confirm{background:#982f39;color:white}
 .tab.ask b{width:auto;height:auto;color:#ff79c6}.tab.ask b::before{content:"?"}
 #rename{position:fixed;z-index:1;background:#292929;color:#eee;border:1px solid #666;border-radius:4px;padding:5px 12px}
 .tab input{min-width:0;width:100%;font:inherit;color:inherit;background:#212121;border:1px solid #6272a4}
@@ -343,20 +483,40 @@ iframe{position:fixed;inset:var(--bar) 0 var(--foot);width:100%;height:calc(100%
 #state{position:fixed;inset:auto 0 0;height:var(--foot);line-height:28px;padding:0 16px;background:var(--page);font-size:13px;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 #state.busy{color:#ffb86c}#state.done{color:#50fa7b}#state.ask{color:#ff79c6}#state.busy::before{content:"\\25CF  ";animation:beat 1.2s infinite}@keyframes beat{50%{opacity:.15}}
 </style></head><body><div id="bar"><div id="tabs"></div><div id="plus" title="New Claude chat">+</div></div><div id="note"></div><div id="state"></div><button id="rename" hidden>Rename</button><script>
-const frames = new Map(), loaded = new Set(), note = document.getElementById("note");
+const frames = new Map(), loaded = new WeakSet(), note = document.getElementById("note");
 let busy = false, timer, shown = null, wanted = null, misses = 0;
 function draw(id) { for (const [key, f] of frames) f.className = key === id ? "on" : ""; }
 function show(id, text) {
   if (id && !frames.has(id)) {
     const f = document.createElement("iframe");
-    f.onload = () => { loaded.add(f); if (wanted === id) draw(id); };
-    setTimeout(f.onload, 3000);
+    let check;
+    function ready() {
+      clearTimeout(check);
+      clearTimeout(fallback);
+      loaded.add(f);
+      if (wanted === id && frames.get(id) === f) draw(id);
+    }
+    function checkMessages() {
+      if (!f.isConnected || loaded.has(f)) return;
+      if (f.contentDocument?.querySelector(".turn-list .turn-group")) ready();
+      else check = setTimeout(checkMessages, 40);
+    }
+    f.onload = ready;
+    check = setTimeout(checkMessages, 40);
+    const fallback = setTimeout(ready, 3000);
     f.src = "s/t-" + id;
     document.body.append(f);
     frames.set(id, f);
   }
   if (id) { const f = frames.get(id); frames.delete(id); frames.set(id, f); }
-  while (frames.size > 5) { const [old, f] = frames.entries().next().value; f.remove(); frames.delete(old); }
+  if (frames.size > 5) {
+    // Keep the visible chat until its replacement is ready.
+    for (const [old, f] of frames) if (f.className !== "on") {
+      frames.delete(old);
+      f.remove();
+      break;
+    }
+  }
   wanted = id;
   if (!id || loaded.has(frames.get(id))) draw(id);
   note.textContent = text || "";
@@ -364,13 +524,19 @@ function show(id, text) {
 }
 // The app shows "running" only while its transcript grows, and a long command writes nothing.
 function words(s) {
+  if (s.menu) return ["ask", "? A menu is open in the terminal below"];
+  if (s.status === "background") {
+    const { agents, mcp } = s.background;
+    const counts = [agents && agents + (agents === 1 ? " agent" : " agents"), mcp && mcp + (mcp === 1 ? " MCP task" : " MCP tasks")];
+    return ["busy", "Working in the background: " + counts.filter(Boolean).join(", ")];
+  }
   const min = Math.floor((Date.now() - s.since) / 60000);
   const ago = min >= 0 ? (min < 1 ? ", just now" : min < 60 ? ", " + min + " min ago" : ", " + Math.floor(min / 60) + " h ago") : "";
-  return s.status === "busy" ? ["busy", "Working"] : s.status === "idle" ? ["done", "\u2713 Done, your turn" + ago] : s.status === "shell" ? ["done", "\u2713 Done, your turn. A background command still runs"]
+  return s.status === "busy" ? ["busy", "Working"] : s.status === "idle" ? ["done", "\u2713 Done, your turn" + ago] : s.status === "shell" ? ["busy", "Working in the background: a shell command"]
     : s.status === "waiting" || (s.status === "asked" && s.unread) ? ["ask", "? Waiting for your answer in the terminal"] : ["", ""];
 }
 function state(s) {
-  const el = document.getElementById("state"), [kind, text] = s.session ? words(s) : ["", ""];
+  const el = document.getElementById("state"), [kind, text] = s.menu || s.session ? words(s) : ["", ""];
   el.className = kind;
   if (el.textContent !== text) el.textContent = text;
 }
@@ -384,7 +550,7 @@ let editing, clickTimer;
 function edit(t, id) {
   const chat = chats.find(c => c.id === id);
   if (!chat || editing === t) return;
-  if (editing) editing.children[3].blur();
+  if (editing) editing.lastElementChild.blur();
   const label = t.children[1], input = document.createElement("input"), before = label.textContent;
   editing = t;
   label.hidden = true;
@@ -436,7 +602,35 @@ function strip() {
     let t = tabs.get(c.id);
     if (!t) {
       t = document.createElement("div");
-      t.append(document.createElement("i"), document.createElement("span"), document.createElement("b"));
+      const close = document.createElement("button");
+      close.textContent = "×";
+      close.setAttribute("aria-label", "Close chat");
+      let until = 0, resetTimer;
+      function resetClose() {
+        until = 0;
+        close.className = "";
+        close.textContent = "×";
+      }
+      function requestClose(e) {
+        e.preventDefault();
+        e.stopPropagation();
+        clearTimeout(clickTimer);
+        clearTimeout(resetTimer);
+        const now = Date.now();
+        if (t.matches(".busy,.ask") && now >= until) {
+          until = now + 3000;
+          close.className = "confirm";
+          close.textContent = "Close?";
+          resetTimer = setTimeout(resetClose, 3000);
+          return;
+        }
+        resetClose();
+        fetch("follow/close" + location.search + "&to=" + c.id, { headers: { "x-orca-chat": "close" } }).catch(() => {});
+      }
+      close.onclick = requestClose;
+      close.ondblclick = close.oncontextmenu = e => { e.preventDefault(); e.stopPropagation(); };
+      t.onauxclick = e => { if (e.button === 1) requestClose(e); };
+      t.append(document.createElement("i"), document.createElement("span"), document.createElement("b"), close);
       t.onclick = () => {
         if (editing === t) return;
         if (c.id !== me) return pick(c.id);
@@ -484,23 +678,21 @@ async function poll() {
   if (busy) return;
   busy = true;
   clearTimeout(timer);
-  if (document.visibilityState === "visible") {
-    let s;
-    try {
-      const res = await fetch("follow/state" + location.search, { cache: "no-store", signal: AbortSignal.timeout(5000) });
-      s = res.ok ? await res.json() : { message: "The chat server refused the request. Run cmux-chat-open in a terminal." };
-    } catch { s = { message: "The chat server does not answer. Run cmux-chat-open in a terminal." }; }
-    // One bad read is not the end of a session: the chat stays for 5 polls.
-    misses = s.session || !wanted ? 0 : misses + 1;
-    if (s.session || (s.message && (!wanted || misses > 4)) || !shown) show(s.session, s.session ? "" : s.message || "Open a terminal tab.");
-    if (s.session || misses > 4 || !wanted) state(s);
-    if ("session" in s) { chats = s.chats || []; plus = s.plus; } // not after a bad poll
-    strip();
-    if (s.session) heal(s.session);
-    if (s.title) document.title = "Chat: " + s.title;
-  }
+  let s;
+  try {
+    const res = await fetch("follow/state" + location.search, { cache: "no-store", signal: AbortSignal.timeout(5000) });
+    s = res.ok ? await res.json() : { message: "The chat server refused the request. Run cmux-chat-open in a terminal." };
+  } catch { s = { message: "The chat server does not answer. Run cmux-chat-open in a terminal." }; }
+  // One bad read is not the end of a session: the chat stays for 5 polls.
+  misses = s.session || !wanted ? 0 : misses + 1;
+  if (s.session || (s.message && (!wanted || misses > 4)) || !shown) show(s.session, s.session ? "" : s.message || "Open a terminal tab.");
+  if (s.menu || s.session || misses > 4 || !wanted) state(s);
+  if ("session" in s) { chats = s.chats || []; plus = s.plus; } // not after a bad poll
+  strip();
+  if (s.session) heal(s.session);
+  if (s.title) document.title = "Chat: " + s.title;
   busy = false;
-  timer = setTimeout(poll, 400);
+  timer = setTimeout(poll, document.visibilityState === "visible" ? 400 : 5000);
 }
 menu.onblur = () => { menu.hidden = true; };
 menu.onkeydown = e => { if (e.key === "Escape") menu.hidden = true; };
