@@ -1,0 +1,15 @@
+--- cmux-sidebar.js
++++ cmux-sidebar.js
+@@ -209,8 +209,11 @@
+ const busyAgents = (w) => liveAgents(w).filter((a) => claimsWork(a) && !titleSaysWaiting(w, a));
+ const isWorking = (w) => !!w && busyAgents(w).length > 0;
+ // Working by the data, but every busy record is a quiet claude one.
++// Codex too (local patch, sidebar-codex-stale.patch): Codex can end a turn without
++// its Stop hook, so its record stays at working. Quiet that long, it is not working.
++const quietKind = (a) => a.kind === "claude" || /codex/i.test(String(a.kind ?? ""));
+ const allStale = (busy, now) =>
+-  busy.every((a) => a.kind === "claude" && now - (a.lastActivityAt ?? 0) >= CLAUDE_STALE_SECONDS);
++  busy.every((a) => quietKind(a) && now - (a.lastActivityAt ?? 0) >= CLAUDE_STALE_SECONDS);
+ 
+ // A 14pt dot slot. `state` is a change-only signal; the dot hides while it
+ // is null. One node: every rendered node costs the host work on every scroll

@@ -1,0 +1,98 @@
+--- cmux-sidebar.js
++++ cmux-sidebar.js
+@@ -208,5 +208,13 @@
+ // The records that claim work, after the rules above except time.
+ const busyAgents = (w) => liveAgents(w).filter((a) => claimsWork(a) && !titleSaysWaiting(w, a));
+-const isWorking = (w) => !!w && busyAgents(w).length > 0;
++// The tabs helper marks a chat while its background work runs (sidebar-background.patch).
++// The helper refreshes this time while it runs (sidebar-background-time.patch).
++const hasBackground = (w) => {
++  const stamp = /(?:^| \| )orca: background (\d{4}-\d\d-\d\dT\d\d:\d\dZ)(?: \| |$)/.exec(w.description ?? "")?.[1];
++  if (!stamp) return false;
++  minute();
++  return Date.now() - Date.parse(stamp) <= 300000;
++};
++const isWorking = (w) => !!w && (hasBackground(w) || busyAgents(w).length > 0);
+ // Working by the data, but every busy record is a quiet claude one.
+ // Codex too (local patch, sidebar-codex-stale.patch): Codex can end a turn without
+@@ -286,4 +294,15 @@
+ const recent = new Set(); // finished under RECENT_SECONDS ago: the clock
+ let wasWorking = new Set();
++// The helper can report background work a few seconds after the agent goes idle.
++const FINISH_GRACE_SECONDS = 8;
++const pendingFinish = new Map();
++const [nextFinish, setNextFinish] = signal(Infinity);
++// The host clock wakes the tracker once, when the first pending wait ends.
++const finishDue = memo(() => {
++  const at = nextFinish();
++  if (at === Infinity) return null;
++  data.clock();
++  return wallNow() >= at ? at : null;
++});
+ let openId; // the open workspace at the tracker's last pass
+ 
+@@ -350,4 +369,5 @@
+   const ws = wsList();
+   minute();
++  finishDue();
+   const now = wallNow();
+   const working = new Set();
+@@ -359,14 +379,21 @@
+     const busy = busyAgents(w);
+     const wasStale = stale.has(w.id);
+-    const staleNow = busy.length > 0 && allStale(busy, now);
++    const background = hasBackground(w);
++    const staleNow = !background && busy.length > 0 && allStale(busy, now);
+     if (staleNow) stale.add(w.id);
+     else stale.delete(w.id);
+-    if (busy.length > 0) {
++    if (background || busy.length > 0) {
+       // Stale too: a long silent turn that ends later is still a finish.
+       working.add(w.id);
++      pendingFinish.delete(w.id);
+       finished.delete(w.id);
+     } else if (wasWorking.has(w.id)) {
++      pendingFinish.set(w.id, { at: now + FINISH_GRACE_SECONDS, wasStale });
++    }
++    const wait = pendingFinish.get(w.id);
++    if (wait && now >= wait.at) {
++      pendingFinish.delete(w.id);
+       finishedAt.set(w.id, now);
+-      if (!wasStale) {
++      if (!wait.wasStale) {
+         endedAt.set(w.id, now);
+         setEndedVersion(now);
+@@ -376,5 +403,5 @@
+     saveTime(w);
+     // The later of the observed and the recorded finish wins.
+-    const told = answeredAt(w, now);
++    const told = working.has(w.id) || wait ? null : answeredAt(w, now);
+     let at = finishedAt.get(w.id) ?? null;
+     if (told !== null && (at === null || told > at)) finishedAt.set(w.id, (at = told));
+@@ -389,4 +416,9 @@
+   }
+   openId = nowOpen;
++  let next = Infinity;
++  for (const [id, wait] of pendingFinish) {
++    if (present.has(id)) next = Math.min(next, wait.at);
++    else pendingFinish.delete(id);
++  }
+   for (const id of finished) if (!present.has(id)) finished.delete(id);
+   for (const id of stale) if (!present.has(id)) stale.delete(id);
+@@ -394,5 +426,6 @@
+   for (const [id, at] of finishedAt) if (now - at >= RECENT_SECONDS) finishedAt.delete(id);
+   wasWorking = working;
+-  setFinishedVersion(Array.from(finished).sort().join(","));
++  setNextFinish(next);
++  setFinishedVersion([...finished].sort().join(",") + "|" + [...pendingFinish.keys()].sort().join(","));
+   setRecentVersion(Array.from(recent).sort().join(","));
+   setStaleVersion(Array.from(stale).sort().join(","));
+@@ -408,5 +441,7 @@
+   if (!w) return null;
+   if (isWorking(w)) return staleVersion() && stale.has(w.id) ? null : "working";
+-  return finishedVersion() && finished.has(w.id) ? "finished" : null;
++  finishedVersion();
++  if (pendingFinish.has(w.id)) return "working";
++  return finished.has(w.id) ? "finished" : null;
+ }
+ const isActive = (w) => activity(w) !== null;

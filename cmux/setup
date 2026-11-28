@@ -5,7 +5,7 @@ cmux reload-config </dev/null
 "$(dirname "$0")/make-groups"; groups=$?
 # The age of each chat, then the projects only, then their look. An update of cmux-sidebar replaces the file, then run this again.
 side="$HOME/.config/cmux/sidebars/cmux-sidebar.js"
-for p in sidebar-age sidebar-projects sidebar-look; do
+for p in sidebar-age sidebar-projects sidebar-look sidebar-codex-stale sidebar-background sidebar-background-time; do
   grep -q "$p.patch" "$side" || patch -s -b -z ".$(date +%Y%m%d%H%M%S).$p.bak" "$side" "$(dirname "$0")/$p.patch" || echo "setup: $p.patch did not apply" >&2
 done
 # The helper of the project strip: cmux-chat-open starts it too, this is for after a restart of cmux.

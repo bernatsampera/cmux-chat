@@ -1,0 +1,15 @@
+--- cmux-sidebar.js
++++ cmux-sidebar.js
+@@ -209,5 +209,11 @@
+ const busyAgents = (w) => liveAgents(w).filter((a) => claimsWork(a) && !titleSaysWaiting(w, a));
+ // The tabs helper marks a chat while its background work runs (sidebar-background.patch).
+-const hasBackground = (w) => /(?:^| \| )orca: background(?: \| |$)/.test(w.description ?? "");
++// The helper refreshes this time while it runs (sidebar-background-time.patch).
++const hasBackground = (w) => {
++  const stamp = /(?:^| \| )orca: background (\d{4}-\d\d-\d\dT\d\d:\d\dZ)(?: \| |$)/.exec(w.description ?? "")?.[1];
++  if (!stamp) return false;
++  minute();
++  return Date.now() - Date.parse(stamp) <= 300000;
++};
+ const isWorking = (w) => !!w && (hasBackground(w) || busyAgents(w).length > 0);
+ // Working by the data, but every busy record is a quiet claude one.

@@ -30,8 +30,14 @@ mock.module("node:fs", () => ({ ...fs, readSync(fd, buffer, start, length, offse
   return bytes;
 } }));
 try {
-  const { followSurface } = await import("../lib/follow");
-  const { pidStart, CHATS_FILE } = await import("../lib/common");
+  const common = await import("../lib/common");
+  const { pidStart, CHATS_FILE } = common;
+  let timeout = false, attempts = 0;
+  mock.module("../lib/common", () => ({ ...common, pidStart(pid: number) {
+    if (pid === child.pid) { attempts++; if (timeout) return ""; }
+    return pidStart(pid);
+  } }));
+  const { followSurface, backgroundTerminals } = await import("../lib/follow");
   const procStart = pidStart(child.pid);
   assert.ok(procStart);
   const status = (status: string) => fs.writeFileSync(join(sessions, child.pid + ".json"),
@@ -40,8 +46,11 @@ try {
   fs.writeFileSync(CHATS_FILE, JSON.stringify({ pid: process.pid, projects: [{ id: "test", chats: [
     { terminal: surface, title: "Test", unread: true, workspace: crypto.randomUUID() }] }] }));
   const append = (row: object) => fs.appendFileSync(transcript, JSON.stringify(row) + "\n");
-  const launch = (content: unknown, extra = {}) => append({ type: "user", timestamp: new Date().toISOString(),
-    message: { content: [{ type: "tool_result", content }] }, ...extra });
+  const launch = (content: unknown, extra = {}, name = typeof content === "string" && content.startsWith("MCP tool") ? "mcp__brain__exec" : "Agent") => {
+    const id = crypto.randomUUID();
+    append({ type: "assistant", message: { content: [{ type: "tool_use", id, name }] } });
+    append({ type: "user", timestamp: new Date().toISOString(), message: { content: [{ type: "tool_result", tool_use_id: id, content }] }, ...extra });
+  };
   const agent = "Async agent launched successfully.\nagentId: abc123 (use this ID to resume)";
   const mcp = 'MCP tool "brain-live/exec" is still running after 120s. It was moved to the background as task ktyap7ywa and keeps running; ...';
   const notice = (id: string, status: string) => '<task-notification>\n<task-id>' + id +
@@ -52,15 +61,34 @@ try {
     assert.equal(state.chats?.[0]?.status, expected);
     assert.deepEqual(state.background, background);
     assert.deepEqual(state.chats?.[0]?.background, background);
+    assert.equal(backgroundTerminals(new Set([surface])).get(surface), expected === "idle" ? false : expected === "shell" || expected === "background" ? true : undefined);
   }
   const pass = (name: string) => { results.push(name); console.log("PASS", name); };
+  timeout = true;
+  backgroundTerminals(new Set([surface]));
+  const firstTry = attempts;
+  timeout = false;
+  assert.equal((await followSurface(surface)).session, sessionId);
+  assert.ok(attempts > firstTry);
+  await Bun.sleep(5050);
+  timeout = true;
+  assert.equal((await followSurface(surface)).session, sessionId);
+  const timedOut = attempts;
+  timeout = false;
+  assert.equal((await followSurface(surface)).session, sessionId);
+  assert.ok(attempts > timedOut);
+  pass("retry an empty process start immediately and keep the last good session during a timeout");
+  launch(agent, {}, "Bash"); launch(mcp, {}, "Bash");
+  launch(mcp, {}, "Agent"); launch(agent, {}, "mcp__brain__exec");
+  await expectState("idle");
+  pass("quotes and results from the wrong tool cannot open background tasks");
   launch(agent, { timestamp: "2000-01-01T00:00:00Z" });
   launch(agent, { isSidechain: true });
   launch("Monitor started (task watcher, command...)");
   launch("Command running in background with ID: cmd1.");
   await expectState("idle");
   pass("ignore old launches, sidechains, monitors and shell commands");
-  launch([{ type: "text", text: agent }]);
+  launch([{ type: "text", text: agent }], {}, "Task");
   await expectState("background", { agents: 1, mcp: 0 });
   append({ type: "user", message: { content: notice("abc123", "running") } });
   launch(mcp);
@@ -102,6 +130,14 @@ try {
   const count = reads.length;
   await expectState("background", { agents: 1, mcp: 0 });
   assert.equal(reads.length, count);
+  fs.appendFileSync(transcript, filler.repeat(1200));
+  const pending = await followSurface(surface);
+  assert.equal(pending.pending, true);
+  assert.equal(pending.status, "background");
+  assert.equal(pending.chats?.[0]?.status, "background");
+  assert.deepEqual(pending.chats?.[0]?.background, { agents: 1, mcp: 0 });
+  assert.equal(backgroundTerminals(new Set([surface])).get(surface), undefined);
+  pass("an unfinished scan preserves page and strip counts and leaves the marker undecided");
   append({ type: "user", message: { content: notice("abc123", "completed") } });
   await expectState("idle");
   pass("read large transcripts in bounded polls without rereading old bytes");

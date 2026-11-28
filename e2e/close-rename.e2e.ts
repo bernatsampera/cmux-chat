@@ -12,6 +12,7 @@
 import { appendFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { pidStart } from "../lib/common";
 
 const read = (file: string) => JSON.parse(readFileSync(file, "utf8"));
 const write = (file: string, data: unknown) => writeFileSync(file, JSON.stringify(data));
@@ -72,6 +73,10 @@ async function fake(dir: string) {
       for (const w of windows) w.workspaces = w.workspaces.filter((s: any) => s.id !== params.workspace_id);
       break;
     case "workspace.rename": spaces.find((w: any) => w.id === params.workspace_id).title = params.title; break;
+    case "workspace.action":
+      if (params.action !== "set_description") throw Error(params.action);
+      spaces.find((w: any) => w.id === params.workspace_id).description = params.description;
+      break;
     default: throw Error(method);
   }
   write(treeFile, windows);
@@ -96,14 +101,16 @@ async function test() {
   const ungrouped = chat(), destination = chat(), fromTab = chat();
   ungrouped.workspace.title = "ungrouped";
   ungrouped.workspace.panes[0].surfaces.push({ ...term(), selected_in_pane: true } as any);
+  const shared = chat(), server = term();
+  shared.workspace.panes.push({ id: uuid(), surfaces: [server] });
   const normal = chat(), replaced = chat(), extra = chat(), gone = chat(), altered = chat(), unseen = chat(), disabled = chat();
   const manual = [normal, replaced, extra, gone, altered, unseen];
   extra.workspace.panes.push({ id: uuid(), surfaces: [term()] });
   unseen.workspace.panes[0].surfaces = [unseen.browser];
   const own = chat(), ownLeaving = term(), ownPage = page(ownLeaving.id);
   own.workspace.panes[0].surfaces.push(ownLeaving, ownPage);
-  write(treeFile, [{ workspaces: [orphan, moved, live, mixed, markdown, rescued, eventSpace, own.workspace,
-    destination.workspace, fromTab.workspace, ungrouped.workspace, disabled.workspace, ...manual.map(c => c.workspace)] }, { workspaces: [space(remote)] }]);
+  write(treeFile, [{ id: uuid(), workspaces: [orphan, moved, live, mixed, markdown, rescued, eventSpace, own.workspace,
+    shared.workspace, destination.workspace, fromTab.workspace, ungrouped.workspace, disabled.workspace, ...manual.map(c => c.workspace)] }, { id: uuid(), workspaces: [space(remote)] }]);
   const calls = () => existsSync(join(dir, "calls")) ? readFileSync(join(dir, "calls"), "utf8").trim().split("\n").map(l => JSON.parse(l)) : [];
   const results: { name: string; ok: boolean }[] = [];
   const check = (name: string, ok: boolean) => { results.push({ name, ok }); console.log(ok ? "PASS" : "FAIL", name); };
@@ -116,6 +123,7 @@ async function test() {
     stdout: "ignore", stderr: Bun.file(log),
   });
   let helper = startHelper("1");
+  let worker: ReturnType<typeof Bun.spawn> | undefined;
   const closed = (id: string) => calls().some(c => c.method === "workspace.close" && c.params.workspace_id === id);
   try {
     await wait(() => existsSync(join(dir, "chats.json")));
@@ -153,6 +161,12 @@ async function test() {
       readFileSync(log, "utf8").includes(message) && !read(join(dir, "chats.json")).projects[0].chats.some((c: any) => c.workspace === fromTab.workspace.id)) &&
       calls().filter(c => c.method === "workspace.close" && c.params.workspace_id === fromTab.workspace.id && c.params.force === true).length === 1);
     check("H14 a mismatched terminal or an ungrouped chat stays open", !closed(live.id) && !closed(ungrouped.workspace.id) && !closed(destination.workspace.id));
+    closeTab(shared.workspace.id, shared.terminal.id);
+    check("H16 closing a shared workspace tab keeps the extra terminal", await wait(() =>
+      readFileSync(log, "utf8").includes("closed chat surfaces in workspace " + shared.workspace.id)) &&
+      !closed(shared.workspace.id) && read(treeFile)[0].workspaces.find((w: any) => w.id === shared.workspace.id)
+        .panes.flatMap((p: any) => p.surfaces).map((t: any) => t.id).join() === server.id &&
+      calls().some(c => c.method === "surface.close" && c.params.surface_id === shared.terminal.id && c.params.force));
     const before = read(treeFile);
     const ownPane = before[0].workspaces.find((w: any) => w.id === own.workspace.id).panes[0];
     ownPane.surfaces = ownPane.surfaces.filter((s: any) => s.id !== ownLeaving.id);
@@ -194,8 +208,10 @@ async function test() {
     check("H07 an unseen terminal is skipped", !closed(unseen.workspace.id));
     helper.kill(); await helper.exited;
     write(join(dir, "event"), { boot_id: "test" });
+    const restart = calls().length;
     helper = startHelper("0");
     if (!await wait(() => read(join(dir, "chats.json")).pid === helper.pid)) throw Error("disabled helper did not start");
+    if (!await wait(() => calls().slice(restart).filter(c => c.method === "workspace.list").length >= 2)) throw Error("missing workspace list");
     const pick = (from: string, to: string) => write(join(dir, "pick.json"), { from, to, at: Date.now() });
     const from = live.panes[0].surfaces[1] as typeof local;
     const selected = join(dir, "selected");
@@ -232,7 +248,7 @@ async function test() {
     check("H07 the environment switch keeps the terminal open", !closed(disabled.workspace.id));
 
     helper.kill(); await helper.exited;
-    check("H08 sweeps and picks without project placeholders skip workspace.list", !calls().some(c => c.method === "workspace.list"));
+    check("H08 sweeps with no background work leave descriptions alone", !calls().some(c => c.method === "workspace.action"));
     const claudeDir = join(dir, "claude"), codexDir = join(dir, "codex");
     mkdirSync(claudeDir); mkdirSync(codexDir);
     const stores = () => ({ sessions: {} as Record<string, object>, activeSessionsBySurface: {} as Record<string, object> });
@@ -242,7 +258,7 @@ async function test() {
       const transcriptPath = join(agent === "claude" ? claudeDir : codexDir, id + ".jsonl");
       store[agent].activeSessionsBySurface[terminal.id] = { sessionId: id };
       store[agent].sessions[id] = { transcriptPath };
-      return { id, transcriptPath, workspace: { ...workspace, title, latest_submitted_at: age === null ? null : new Date(Date.now() - age).toISOString() } };
+      return { id, terminal, transcriptPath, workspace: { ...workspace, title, latest_submitted_at: age === null ? null : new Date(Date.now() - age).toISOString() } };
     };
     const claude = fixture("claude", "Claude + chat", 120000), codex = fixture("codex", "Codex + chat", 120000);
     const fresh = fixture("claude", "Claude + chat", 10000), custom = fixture("claude", "My title", 120000);
@@ -260,10 +276,26 @@ async function test() {
       [capped.id, "Investigate authentication failures affecting production..."],
     ].map(([id, thread_name]) => JSON.stringify({ id, thread_name })).join("\n"));
     const grouped = [claude, codex, fresh, custom, empty, missing, invalid, dots, capped].map(c => c.workspace);
-    write(treeFile, [{ id: uuid(), workspaces: [...grouped, { ...outside.workspace, ungrouped: true }] }]);
+    const stamp = "notes | last active 2026-11-28T08:07Z", marked = "orca: background | " + stamp;
+    Object.assign(custom.workspace, { description: stamp });
+    Object.assign(empty.workspace, { description: marked });
+    write(treeFile, [{ id: uuid(), workspaces: [...grouped, { ...outside.workspace, description: marked, ungrouped: true }] }]);
+    const sessions = join(claudeDir, "sessions");
+    mkdirSync(sessions);
+    worker = Bun.spawn([process.execPath, "-e", "setInterval(() => {}, 60000)"], { env: { CMUX_SURFACE_ID: custom.terminal.id } });
+    const session = { pid: worker.pid, sessionId: custom.id, procStart: pidStart(worker.pid), kind: "interactive" };
+    const status = (status: string) => write(join(sessions, session.pid + ".json"), { ...session, status });
+    const projectDir = join(claudeDir, "projects", "test");
+    mkdirSync(projectDir, { recursive: true });
+    writeFileSync(join(projectDir, custom.id + ".jsonl"), "");
+    status("shell");
     helper = startHelper("0");
     const renamed = (id: string) => calls().filter(c => c.method === "workspace.rename" && c.params.workspace_id === id);
     if (!await wait(() => readFileSync(log, "utf8").includes("named chat workspace " + capped.workspace.id))) throw Error("session title sweep did not finish");
+    const descriptions = (id: string) => calls().filter(c => c.method === "workspace.action" && c.params.workspace_id === id).map(c => c.params.description);
+    const firstMarker = descriptions(custom.workspace.id)[0];
+    check("H15 first sweep adds the marker before notes and age with one write", descriptions(custom.workspace.id).length === 1 && /^orca: background \d{4}-\d\d-\d\dT\d\d:\d\dZ$/.test(firstMarker?.split(" | ")[0]) && firstMarker.endsWith(" | " + stamp));
+    check("H15 first sweep removes a stale marker and keeps the stamp", JSON.stringify(descriptions(empty.workspace.id)) === JSON.stringify([stamp]));
     const sessionName = (c: typeof claude, title: string, agent: string) => renamed(c.workspace.id)[0]?.params.title === title &&
       readFileSync(log, "utf8").split("\n").filter(l => l.endsWith(`named chat workspace ${c.workspace.id} from its ${agent} session title`)).length === 1;
     check("H08 Claude uses the last aiTitle in a large transcript", sessionName(claude, "Fix the queue", "claude"));
@@ -277,12 +309,34 @@ async function test() {
     const current = read(treeFile);
     for (const w of current[0].workspaces) if ([fresh.workspace.id, empty.workspace.id].includes(w.id)) w.title = "Named by cmux";
     write(treeFile, current);
+    status("busy");
     const since = calls().length;
     if (!await wait(() => calls().slice(since).filter(c => c.method === "workspace.group.list").length >= 2, 12000)) throw Error("two later sweeps did not finish");
-    check("H12 one workspace.list for the batch and no retry on later sweeps within five minutes",
-      calls().filter(c => c.method === "workspace.list").length === 1 && !renamed(missing.workspace.id).length);
+    check("H12 no title retry on later sweeps within five minutes", !renamed(missing.workspace.id).length);
+    check("H15 unchanged work causes no repeat write", descriptions(custom.workspace.id).length === 1 && descriptions(empty.workspace.id).length === 1);
+    const faulty = read(treeFile), pair1 = chat(), pair2 = chat();
+    Object.assign(pair1.terminal, { title: "trigger rename" });
+    pair1.workspace.panes.push(...pair2.workspace.panes);
+    faulty[0].workspaces.push(pair1.workspace);
+    faulty[0].workspaces.find((w: any) => w.id === custom.workspace.id).description = "orca: background 2020-01-01T00:00Z | " + stamp;
+    write(treeFile, faulty);
+    check("H17 busy keeps and refreshes the marker even when tab naming fails", await wait(() =>
+      descriptions(custom.workspace.id).length >= 2 && calls().some(c => c.method === "surface.action" && c.params.workspace_id === pair1.workspace.id), 9000)
+      && descriptions(custom.workspace.id)[1].startsWith("orca: background ") && descriptions(custom.workspace.id)[1].endsWith(" | " + stamp));
+    const beforeScan = calls().filter(c => c.method === "surface.action").length;
+    writeFileSync(join(projectDir, custom.id + ".jsonl"), (JSON.stringify({ text: "x".repeat(8192) }) + "\n").repeat(640));
+    status("idle");
+    check("H18 an unfinished idle scan leaves the workspace marker in place", await wait(() =>
+      calls().filter(c => c.method === "surface.action").length > beforeScan, 8000) &&
+      descriptions(custom.workspace.id).at(-1).startsWith("orca: background "));
+    await wait(() => readFileSync(log, "utf8").includes("background off " + custom.workspace.id), 8000);
+    check("H15 ending work restores the exact notes and stamp", descriptions(custom.workspace.id).at(-1) === stamp);
+    check("H15 a non-project workspace loses its marker", descriptions(outside.workspace.id).join() === stamp);
+    const changes = readFileSync(log, "utf8").split("\n").filter(line => line.includes("background ")).map(line => line.slice(line.indexOf("background ")));
+    check("H15 one log line per change", changes.sort().join() === ["background on " + custom.workspace.id, "background on " + custom.workspace.id,
+      "background off " + custom.workspace.id, "background off " + outside.workspace.id, "background off " + empty.workspace.id].sort().join());
   } catch (error) { check(String(error), false); }
-  finally { helper.kill(); await helper.exited; }
+  finally { worker?.kill(); helper.kill(); await helper.exited; }
   const failed = results.filter(r => !r.ok).length;
   write(join(dir, "result.json"), { passed: results.length - failed, failed, results });
   console.log(results.length - failed + " passed, " + failed + " failed");

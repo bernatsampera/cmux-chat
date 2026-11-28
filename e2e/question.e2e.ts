@@ -140,13 +140,19 @@ try {
     const cli = join(dir, "fake-cmux"), trace = join(dir, "daemon-calls.jsonl"), logFile = join(dir, "tabs.log");
     const tree = await rpc("system.tree", {});
     const visible = tree.windows[0].workspaces[0], hidden = structuredClone(visible);
+    for (const pane of visible.panes) pane.surfaces[0].selected_in_pane = true;
     visible.selected = true; hidden.selected = false; hidden.id = crypto.randomUUID();
     const hiddenId = hidden.panes[0].surfaces[0].id = crypto.randomUUID();
     hidden.panes[1].surfaces[0].url = page.replace(surface, hiddenId);
+    const codex = structuredClone(visible);
+    codex.id = crypto.randomUUID();
+    codex.panes[0].surfaces[0].id = codexSurface;
+    codex.panes[1].surfaces[0].url = page.replace(surface, codexSurface);
+    tree.windows.push({ workspaces: [codex] });
     tree.windows[0].workspaces.push(hidden);
     writeFileSync(join(dir, "tree.json"), JSON.stringify(tree));
     const screen = (text: string) => writeFileSync(join(dir, "screen"), text);
-    const normal = ["Esc to cancel", ...Array(12).fill("output"), "esc to interrupt", "shift+tab to cycle", "? for shortcuts"].join("\n");
+    const normal = ["Esc to cancel", "output", "esc to interrupt", "shift+tab to cycle", "? for shortcuts"].join("\n");
     screen(normal);
     writeFileSync(cli, `#!${process.execPath}
 import fs from "node:fs";
@@ -167,6 +173,7 @@ if (verb === "events") {
   fs.appendFileSync("daemon-calls.jsonl", JSON.stringify({method, p, at:Date.now()}) + "\\n");
   let reply = {};
   if (method === "system.tree") reply = tree;
+  else if (method === "workspace.list") reply = {workspaces:[]};
   else if (method === "workspace.group.list") reply = {groups: []};
   else if (method === "notification.list") reply = {notifications: []};
   else if (method === "pane.list") {
@@ -184,9 +191,9 @@ if (verb === "events") {
     }
     status("idle");
     writeFileSync(transcript, "");
-    const launch = (picker: string) => Bun.spawn([process.execPath, join(import.meta.dir, "../lib/tabs.ts")], {cwd: dir,
+    const launch = (picker: string, resize = "1") => Bun.spawn([process.execPath, join(import.meta.dir, "../lib/tabs.ts")], {cwd: dir,
       env: { HOME: dir, PATH: "/usr/bin:/bin", ORCA_CHAT_STATE_DIR: dir, CLAUDE_CONFIG_DIR: dir,
-        ORCA_CHAT_PICKER_RESIZE: picker, ORCA_CHAT_QUESTION_RESIZE: "1",
+        ORCA_CHAT_PICKER_RESIZE: picker, ORCA_CHAT_QUESTION_RESIZE: resize,
         CODEX_HOME: process.env.CODEX_HOME, CMUX_BUNDLED_CLI_PATH: cli, CMUX_SOCKET_PATH: join(dir, "unused.sock") },
       stdin: "ignore", stdout: "ignore", stderr: Bun.file(logFile) });
     let helper = launch("1");
@@ -198,13 +205,17 @@ if (verb === "events") {
       await check("M03 normal input and old menu hints leave the pane alone", async () => {
         await waitFor(() => reads().length >= 3);
         assert.equal(moves().length, 0);
+        assert.ok(daemonCalls().filter(c => c.method === "system.tree").length < reads().length);
+        screen(["────────────", "❯ input", "────────────", "Esc to cancel"].join("\n"));
+        await waitFor(() => reads().filter(c => c.screen.includes("❯ input")).length >= 3);
+        assert.equal(moves().length, 0);
       });
       question("daemon");
       await waitFor(() => daemonCalls().some(c => c.method === "pane.resize"));
       answer("daemon");
       await waitFor(() => daemonCalls().filter(c => c.method === "pane.resize").length >= 2);
       assert.deepEqual(moves().map(c => [c.p.pane_id, c.p.direction, c.p.amount]), [[termPane,"up",480],[pagePane,"down",480]]);
-      assert.equal(daemonCalls().filter(c => !["system.tree","pane.list","workspace.group.list","notification.list","pane.resize","read-screen"].includes(c.method)).length, 0);
+      assert.equal(daemonCalls().filter(c => !["system.tree","workspace.list","pane.list","workspace.group.list","notification.list","pane.resize","read-screen"].includes(c.method)).length, 0);
       const log = readFileSync(logFile, "utf8");
       assert.ok(log.includes("grow " + surface + " up 480"));
       assert.ok(log.includes("shrink " + surface + " down 480"));
@@ -258,6 +269,13 @@ if (verb === "events") {
           if (i) assert.ok(c.at - history[i - 1].at >= 400);
         }
       });
+      await check("M08 an unchanged screen slows down and a changed screen resumes fast reads", async () => {
+        await Bun.sleep(12000);
+        await waitFor(() => reads().at(-1).at - reads().at(-2).at >= 1450);
+        screen("changed");
+        await waitFor(() => reads().filter(c => c.screen === "changed").length >= 2);
+        assert.ok(reads().at(-1).at - reads().at(-2).at < 1400);
+      });
       await check("M07 disabling picker resizing skips reads and growth", async () => {
         screen(menu); await waitFor(() => moves().length === 7);
         helper.kill(); await helper.exited;
@@ -268,6 +286,15 @@ if (verb === "events") {
         await waitFor(() => JSON.parse(readFileSync(join(dir, "chats.json"), "utf8")).pid === helper.pid);
         await Bun.sleep(1400);
         assert.equal(reads().length, before);
+        assert.equal(moves().length, 7);
+      });
+      await check("M09 disabling questions also suppresses matching menu hints", async () => {
+        helper.kill(); await helper.exited;
+        question("disabled"); screen(menu);
+        const first = reads().length;
+        helper = launch("1", "0");
+        await waitFor(() => reads().length >= first + 3);
+        assert.deepEqual(menuIds(), [surface]);
         assert.equal(moves().length, 7);
       });
     } finally { helper.kill(); await helper.exited; }

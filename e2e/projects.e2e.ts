@@ -17,6 +17,8 @@
 //   J12 (sidebar-look.patch) A section looks like a project, two projects have the same icon color, a project with
 //       nothing open looks like one with chats, a chevron with nothing to unfold, the open project does not stand out,
 //       no line between two sections, or the toggle of the chats breaks the icons.
+//   J13 An idle agent flashes green before a background marker arrives or a new turn starts.
+//       Work that really ended stays orange until another workspace update arrives.
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import vm from "node:vm";
@@ -48,6 +50,10 @@ function mount(ws: any[], groups: any[]) {
     __host_action: (j: string) => { const a = JSON.parse(j); if (a.kind === "cmux") actions.push(a); }, __host_log: () => {},
   });
   vm.runInContext(readFileSync(RUNTIME, "utf8"), ctx);
+  const tick = (t: number) => {
+    vm.runInContext(`Date.now = () => ${t * 1000}`, ctx);
+    ctx.__setData("clock", JSON.stringify({ epoch: t }));
+  };
   const set = (list: any[], gs: any[], t = T) => {
     const all = list.map((w, index) => ({ selected: false, pinned: false, unread: 0, directory: "/tmp", ports: [], portCount: 0, ...w, index }));
     vm.runInContext(`Date.now = () => ${t * 1000}`, ctx);
@@ -68,7 +74,7 @@ function mount(ws: any[], groups: any[]) {
   };
   const tap = (id: string) => ctx.__dispatch(id, "tap", "{}");
   const calls = () => actions.splice(0).filter((a) => a.params?.action !== "set_description").map((a) => `${a.command ?? a.name ?? a.method} ${a.params?.workspace_id ?? a.params?.group_id ?? ""}`);
-  return { set, nodes, deep, root: () => root, list, rows: () => list().map((c) => texts(c)[0]?.toLowerCase()).filter(Boolean), find, marks, tap, calls, ops: () => ops, background: (t: string) => nodes.get(find(t)).props.background, raw: actions };
+  return { set, tick, nodes, deep, root: () => root, list, rows: () => list().map((c) => texts(c)[0]?.toLowerCase()).filter(Boolean), find, marks, tap, calls, ops: () => ops, background: (t: string) => nodes.get(find(t)).props.background, raw: actions };
 }
 
 const G = [group("p", "p"), group("q", "q"), group("sub", "p/sub"), group("empty", "empty")];
@@ -79,6 +85,64 @@ const want = (a: string[], b: string[]) => JSON.stringify(a) === JSON.stringify(
 const folder = (s: ReturnType<typeof mount>) => s.deep(s.root(), (n) => Object.values(n.props).some((v) => String(v).startsWith("Projects only: hide")))[0];
 const ORANGE = "#FF8A00", PINK = "#FF79C6", GREEN = "#30D158";
 
+const marker = "orca: background " + new Date(T * 1000).toISOString().slice(0, 16) + "Z";
+{ const stamp = "last active 2026-01-01T00:00Z";
+  const marked = (description: string, status = "idle") => opened("shell", W().map(w => w.id === "q1"
+    ? { ...w, description, latestAt: T, agents: [ag(status, T - 3600)] } : w));
+  const text = marker + " | notes | " + stamp;
+  const s = mount(marked(text), G);
+  const chatDot = (color: string) => {
+    s.tap(folder(s).id);
+    const visible = s.deep(s.find("q1"), n => n.type === "circle" && n.props.fill === color && n.props.opacity === 1).length > 0;
+    s.tap(folder(s).id);
+    return visible;
+  };
+  ok("J13", "an idle agent with background work has an orange project badge", s.marks("q") === ORANGE + " 1", s.marks("q"));
+  ok("J13", "the chat shows its orange dot", chatDot(ORANGE));
+  ok("J13", "saving the age keeps the marker and notes", s.raw.some(a => a.params?.workspace_id === "q1" &&
+    a.params.description === marker + " | notes | last active " + new Date(T * 1000).toISOString().slice(0, 16) + "Z"));
+  const expired = mount(marked(text.replace(marker, "orca: background 2020-01-01T00:00Z")), G);
+  ok("J13", "an expired marker cannot turn an idle project orange", !expired.marks("q").includes(ORANGE));
+  const stopped = mount(marked(text), G);
+  stopped.tick(T + 301); stopped.tick(T + 310);
+  ok("J13", "the clock expires a stopped helper marker", !stopped.marks("q").includes(ORANGE));
+  s.set(marked(text, "working"), G);
+  ok("J13", "a stale agent record cannot hide background work", s.marks("q") === ORANGE + " 1", s.marks("q"));
+  s.set(marked("notes mention orca: background | " + stamp), G, T + 5);
+  s.tick(T + 13);
+  ok("J13", "removing the exact marker turns the project badge green", s.marks("q") === GREEN + " 1", s.marks("q"));
+  ok("J13", "the finished chat shows its green dot", chatDot(GREEN)); }
+
+{ const state = (status: string, description = "") => opened("shell", W().map(w => w.id === "q1"
+    ? { ...w, agents: [ag(status)], description } : w));
+  const s = mount(state("working"), G);
+  const check = (name: string, color: string) => ok("J13", name, s.marks("q") === color + " 1", s.marks("q"));
+  s.set(state("idle"), G, T);
+  check("the chat stays orange when the agent goes idle", ORANGE);
+  s.set(state("idle", marker), G, T + 3);
+  s.tick(T + 8);
+  check("the marker arriving three seconds later cancels the first finish", ORANGE);
+  s.set(state("idle"), G, T + 10);
+  s.tick(T + 17.999);
+  check("the chat stays orange for the full wait after the marker goes", ORANGE);
+  s.tick(T + 18);
+  check("the clock alone turns the badge green after background work ends", GREEN);
+
+  s.set(state("working"), G, T + 20);
+  s.set(state("idle"), G, T + 21);
+  s.tick(T + 28.999);
+  check("a turn without background work stays orange before eight seconds", ORANGE);
+  s.tick(T + 29);
+  check("a turn without background work turns green at eight seconds", GREEN);
+
+  s.set(state("working"), G, T + 30);
+  s.set(state("idle"), G, T + 31);
+  s.set(state("working"), G, T + 34);
+  s.tick(T + 39);
+  check("a new prompt keeps the badge orange past the canceled deadline", ORANGE);
+  s.set(state("idle"), G, T + 40);
+  check("the new turn gets its own wait when it ends", ORANGE); }
+
 { const s = mount(opened("p1"), G);
   ok("J01", "a group lists no chat, also not one that works or is open", want(s.rows(), ["p", "p-files", "alone", "sub", "q", "empty", "loose", "shell"]), s.rows());
   ok("J02", "a plain terminal, an agent with no page, and a chat in no group stay", ["p-files", "alone", "loose", "shell"].every((t) => s.rows().includes(t)));
@@ -87,15 +151,16 @@ const ORANGE = "#FF8A00", PINK = "#FF79C6", GREEN = "#30D158";
   ok("J03", "nothing happens: the number of chats", s.marks("q") === "1" && s.marks("empty") === "", [s.marks("q"), s.marks("empty")]);
   ok("J07", "the header of the open chat looks open, the others do not", Boolean(s.background("p")) && s.background("p") !== s.background("q"), [s.background("p"), s.background("q")]);
   s.set(opened("q1", W().map((w) => (w.id === "p2" ? { ...w, agents: [ag("idle", T + 5)] } : w))), G, T + 5);
+  s.tick(T + 13);
   ok("J03", "finished while another one is open", s.marks("p") === `${GREEN} 1`, s.marks("p"));
   ok("J07", "then the header of that project", !s.background("p") && Boolean(s.background("q")));
-  s.set(opened("p2", W().map((w) => (w.id === "p2" ? { ...w, agents: [ag("idle", T + 5)] } : w))), G, T + 6);
+  s.set(opened("p2", W().map((w) => (w.id === "p2" ? { ...w, agents: [ag("idle", T + 5)] } : w))), G, T + 14);
   ok("J03", "opened: not finished any more", s.marks("p") === "2", s.marks("p"));
   s.calls(); s.tap(s.find("p")); const last = s.calls();
-  s.set(opened("q1"), G, T + 7); s.calls(); s.tap(s.find("p")); const back = s.calls();
+  s.set(opened("q1"), G, T + 15); s.calls(); s.tap(s.find("p")); const back = s.calls();
   ok("J05", "a click opens the chat that was open last", want(back, ["workspace.select p2"]), [last, back]);
   ok("J10", "and calls nothing else", back.length === 1);
-  s.set(opened("q1", W().filter((w) => w.id !== "p2")), G, T + 8); s.tap(s.find("p")); const closed = s.calls();
+  s.set(opened("q1", W().filter((w) => w.id !== "p2")), G, T + 16); s.tap(s.find("p")); const closed = s.calls();
   ok("J05", "that one is closed: the first chat", want(closed, ["workspace.select p1"]), closed); }
 { const s = mount(opened("shell"), G); s.calls(); s.tap(s.find("q")); ok("J05", "none was open: the first chat of this group", want(s.calls(), ["workspace.select q1"]));
   s.tap(s.find("empty")); const e = s.calls(); ok("J06", "a group with no chat opens its anchor", want(e, ["workspace.select empty-anchor"]), e);

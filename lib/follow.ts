@@ -81,6 +81,7 @@ function cachedStart(pid: number): string {
   const now = Date.now(), cached = starts.get(pid);
   if (cached && now < cached.until) return cached.start;
   const start = pidStart(pid);
+  if (!start) return cached?.start ?? "";
   if (starts.size >= 256) starts.delete(starts.keys().next().value!);
   starts.set(pid, { start, until: now + 5000 });
   return start;
@@ -156,7 +157,7 @@ function bind(c: Claim, tabId: string, transcriptPath: string) {
   }
 }
 
-type Activity = { status?: string; background?: { agents: number; mcp: number } };
+type Activity = { pending?: true; status?: string; background?: { agents: number; mcp: number } };
 interface State extends Activity { menu?: true; session: string | null; title: string; message: string | null; since?: number; chats?: Activity[]; plus?: boolean }
 const none = (message: string | null, title = ""): State => ({ session: null, title, message });
 
@@ -258,6 +259,31 @@ function active(found: Claim[]) {
   return found[0];
 }
 
+export function claudeTerminals(terminals: Set<string>) {
+  const claude = claudeClaims(terminals), leaves = new Set(claude.map(c => c.leaf));
+  if (leaves.size) {
+    const found = [...claude, ...codexClaims(leaves)];
+    for (const leaf of leaves) if (active(found.filter(c => c.leaf === leaf))?.agent !== "claude") leaves.delete(leaf);
+  }
+  return leaves;
+}
+
+// An absent decision keeps the marker already in the workspace description.
+export function backgroundTerminals(terminals: Set<string>) {
+  const found = claims(terminals), budget = { bytes: 4 << 20 };
+  const background = new Map<string, boolean>();
+  for (const terminal of terminals) {
+    const here = found.filter(c => c.leaf === terminal), agent = active(here);
+    const activity = agent && activityOf(agent, budget);
+    if (!here.length) background.set(terminal, false);
+    else if (activity && !activity.pending) {
+      if (activity.status === "background" || activity.status === "shell") background.set(terminal, true);
+      else if (activity.status === "idle") background.set(terminal, false);
+    }
+  }
+  return background;
+}
+
 function settle(found: Claim[], tabId: string, title: string, budget: { bytes: number }): State {
   const c = active(found);
   if (!c && found.length) return none("More than one agent runs in this terminal.", title);
@@ -271,12 +297,12 @@ function settle(found: Claim[], tabId: string, title: string, budget: { bytes: n
 type TaskKind = "agents" | "mcp";
 interface TaskScan {
   process: string; ino: number; size: number; modified: number; offset: number;
-  parts: Buffer[]; open: Map<string, TaskKind>; back: number;
+  tools: Map<string, TaskKind>; parts: Buffer[]; open: Map<string, TaskKind>; back: number;
 }
 const taskScans = new Map<string, TaskScan>(), TASK_TAIL = 8 << 20;
 
-function applyTaskRow(line: Buffer, open: Map<string, TaskKind>, start: number, sessionId: string) {
-  if (!["Async agent launched successfully.", "moved to the background as task", "<task-notification>", "TaskStop"].some(s => line.includes(s))) return;
+function applyTaskRow(line: Buffer, { open, tools }: TaskScan, start: number, sessionId: string) {
+  if (!['"tool_use"', '"tool_result"', "<task-notification>"].some(s => line.includes(s))) return;
   let row;
   try { row = JSON.parse(line.toString()); } catch { return; }
   if (!row || (row.sessionId && row.sessionId !== sessionId)) return;
@@ -291,25 +317,43 @@ function applyTaskRow(line: Buffer, open: Map<string, TaskKind>, start: number, 
   if (typeof content === "string" && (row.type === "queue-operation" || row.type === "user")) return notice(content);
   if (!Array.isArray(content)) return;
   for (const item of content) {
-    if (row.type === "assistant" && item?.type === "tool_use" && item.name === "TaskStop") open.delete(item.input?.task_id);
+    if (row.type === "assistant" && item?.type === "tool_use" && !row.isSidechain) {
+      if (item.name === "TaskStop") open.delete(item.input?.task_id);
+      if (typeof item.id !== "string") continue;
+      if (item.name === "Agent" || item.name === "Task") tools.set(item.id, "agents");
+      else if (item.name?.startsWith("mcp__")) tools.set(item.id, "mcp");
+    }
     if (row.type !== "user" && row.type !== "queue-operation") continue;
     if (item?.type === "text" && typeof item.text === "string") notice(item.text);
     if (row.type !== "user" || item?.type !== "tool_result" || row.isSidechain || !(Date.parse(row.timestamp) > start)) continue;
+    const kind = tools.get(item.tool_use_id);
+    tools.delete(item.tool_use_id);
+    if (!kind) continue;
     const text = typeof item.content === "string" ? item.content : Array.isArray(item.content)
       ? item.content.filter((p: any) => p?.type === "text").map((p: any) => p.text).join("\n") : "";
     const agent = text.includes("Async agent launched successfully.") && /^agentId:\s*([a-z0-9]+) \(/m.exec(text);
-    if (agent) open.set(agent[1], "agents");
+    if (agent && kind === "agents") open.set(agent[1], "agents");
     const mcp = /^MCP tool "[^"\n]+" is still running[^\n]*?moved to the background as task ([a-z0-9]+)\b/m.exec(text);
-    if (mcp) open.set(mcp[1], "mcp");
+    if (mcp && kind === "mcp") open.set(mcp[1], "mcp");
   }
 }
 
+const lastActivity = new Map<string, { session: string; activity: Activity }>();
 function activityOf(c: Claim, budget: { bytes: number }, path?: string): Activity {
-  if (c.agent !== "claude" || c.status !== "idle") return { status: c.status };
+  if (c.agent !== "claude") return { status: c.status };
+  const session = [c.pid, c.start, c.sessionId].join("/");
+  const previous = lastActivity.get(c.leaf);
+  const pending = (): Activity => ({ ...(previous?.session === session ? previous.activity : { status: c.status }), pending: true });
+  const remember = (activity: Activity) => {
+    if (lastActivity.size >= 256 && !previous) lastActivity.delete(lastActivity.keys().next().value!);
+    lastActivity.set(c.leaf, { session, activity });
+    return activity;
+  };
+  if (c.status !== "idle") return remember({ status: c.status });
   let fd: number | undefined;
   try {
     path ??= claudePath(c.sessionId);
-    if (!path) return { status: c.status };
+    if (!path) return pending();
     fd = openSync(path, "r");
     const { ino, size, mtimeMs } = fstatSync(fd);
     const process = c.pid + "/" + c.start;
@@ -317,7 +361,7 @@ function activityOf(c: Claim, budget: { bytes: number }, path?: string): Activit
     if (!scan || scan.process !== process || scan.ino !== ino || size < scan.size || (size === scan.size && mtimeMs !== scan.modified)) {
       if (taskScans.size >= 128) taskScans.delete(taskScans.keys().next().value!);
       const back = size > TASK_TAIL ? size : 0;
-      scan = { process, ino, size, modified: mtimeMs, offset: 0, back, parts: [], open: new Map() };
+      scan = { process, ino, size, modified: mtimeMs, offset: 0, back, tools: new Map(), parts: [], open: new Map() };
       taskScans.set(path, scan);
     }
     scan.size = size;
@@ -328,7 +372,7 @@ function activityOf(c: Claim, budget: { bytes: number }, path?: string): Activit
     if (scan.back > 0 && budget.bytes > 0) {
       const length = Math.min(scan.back, budget.bytes);
       const pos = scan.back - length, buf = Buffer.allocUnsafe(length);
-      if (readSync(fd, buf, 0, length, pos) !== length) return { status: c.status };
+      if (readSync(fd, buf, 0, length, pos) !== length) return pending();
       budget.bytes -= length;
       scan.back = pos;
       let end = buf.lastIndexOf(10);
@@ -348,7 +392,7 @@ function activityOf(c: Claim, budget: { bytes: number }, path?: string): Activit
         end = prev;
       }
     }
-    if (scan.back) return { status: c.status };
+    if (scan.back) return pending();
     const length = Math.min(size - scan.offset, budget.bytes);
     if (length > 0) {
       const buffer = Buffer.allocUnsafe(length);
@@ -359,20 +403,20 @@ function activityOf(c: Claim, budget: { bytes: number }, path?: string): Activit
         const part = bytes.subarray(from, end);
         const line = scan.parts.length ? Buffer.concat([...scan.parts, part]) : part;
         scan.parts.length = 0;
-        applyTaskRow(line, scan.open, start, c.sessionId);
+        applyTaskRow(line, scan, start, c.sessionId);
       }
       if (from < bytes.length) scan.parts.push(Buffer.from(bytes.subarray(from)));
       scan.offset += bytes.length;
     }
     // Until we reach the end, a later row could still change the count.
-    if (scan.offset < size) return { status: c.status };
+    if (scan.offset < size) return pending();
     if (scan.open.size) {
       const background = { agents: 0, mcp: 0 };
       for (const kind of scan.open.values()) background[kind]++;
-      return { status: "background", background };
+      return remember({ status: "background", background });
     }
-    return { status: "idle" };
-  } catch { return { status: undefined }; }
+    return remember({ status: "idle" });
+  } catch { return pending(); }
   finally { if (fd !== undefined) closeSync(fd); }
 }
 

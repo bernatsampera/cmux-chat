@@ -10,7 +10,7 @@ import { spawn } from "node:child_process";
 import { closeSync, fstatSync, openSync, readFileSync, readSync } from "node:fs";
 import { join } from "node:path";
 import { CHATS_FILE, CLOSE_FILE, CODEX_DIR, MENUS_FILE, DATA_DIR, PICK_FILE, RENAME_FILE, validTitle, STATE_DIR, UUID, ensureStateDir, readStore, Refusal, refuse, run, writePrivate, type Chat, type Project } from "./common";
-import { waitingQuestions } from "./follow";
+import { backgroundTerminals, claudeTerminals, waitingQuestions } from "./follow";
 
 // The second form is the one-time link, until the page has followed it.
 const PAGE = new RegExp(`^http://127\\.0\\.0\\.1:${Number(process.env.ORCA_CHAT_PORT || 47739)}/(?:[0-9a-f]{64}/follow|cmux-open)\\?cmux=([0-9a-f-]{36})(?:&until=\\d+&sig=[0-9a-f]{64})?$`, "i");
@@ -58,6 +58,19 @@ export async function readProjects(rpc: Rpc, all: Tab[]): Promise<Project[]> {
   const [{ groups }, { notifications }] = await Promise.all([rpc("workspace.group.list", {}), rpc("notification.list", {})]);
   const unread = new Set<string>(notifications.filter((n: any) => !n.is_read).map((n: any) => low(n.surface_id ?? n.workspace_id)));
   return groups.map((g: any) => ({ id: low(g.id), folder: folderOf(g), chats: g.member_workspace_ids.flatMap((id: string) => chatOf(all.filter((t) => t.workspace === low(id)), unread)) })).filter((p: Project) => p.chats.length);
+}
+
+function markedDescription(text: string, on: boolean | undefined): string {
+  const marker = /^orca: background(?: (\d{4}-\d\d-\d\dT\d\d:\d\dZ))?$/;
+  const parts = text ? text.split(" | ") : [];
+  const old = parts.find(part => marker.test(part));
+  if (on ?? (old !== undefined)) {
+    const age = Date.now() - Date.parse(old?.match(marker)?.[1] ?? "");
+    if (age >= 0 && age < 115_000) return text;
+    const stamp = new Date().toISOString().slice(0, 16) + "Z";
+    return ["orca: background " + stamp, ...parts.filter(part => !marker.test(part))].join(" | ");
+  }
+  return parts.filter(part => !marker.test(part)).join(" | ");
 }
 
 const NEW_CHAT = "Claude + chat";
@@ -172,27 +185,37 @@ export function questionWatcher(rpc: Rpc, log: (line: string) => void, cmux?: (a
   const enabled = process.env.ORCA_CHAT_QUESTION_RESIZE !== "0";
   const picker = process.env.ORCA_CHAT_PICKER_RESIZE !== "0" && cmux;
   const menus = new Set<string>();
-  let written = "", lastRead = -Infinity;
+  const screens = new Map<string, { text?: string; changed: number; read: number }>();
+  let written = "", claimKey = "", checked = -Infinity, live = new Set<string>();
   return async (tabs: Tab[]) => {
     if (!enabled && !picker) return;
-    if (picker && tabs.some(t => t.visible && t.chat && pairFor(tabs, t.chat))) {
-      if (performance.now() - lastRead < 400) return;
-      // Selection can change between sweeps. Check it just before reading screens.
-      tabs = await readTabs(rpc);
-      const visible = new Set(tabs.flatMap(t => t.visible && t.chat && pairFor(tabs, t.chat) ? [t.chat] : []));
-      await Promise.all([...visible].map(async surface => {
+    if (picker) {
+      const visible = new Set(tabs.flatMap(t => t.visible && t.selected && t.chat && pairFor(tabs, t.chat)?.term.selected ? [t.chat] : []));
+      const key = [...visible].sort().join(), now = performance.now();
+      if (key !== claimKey || now - checked >= 1500) {
+        live = claudeTerminals(visible);
+        claimKey = key;
+        checked = now;
+      }
+      for (const id of screens.keys()) if (!live.has(id)) screens.delete(id);
+      for (const id of visible) if (!live.has(id)) menus.delete(id);
+      await Promise.all([...live].map(async surface => {
+        const state = screens.get(surface) ?? { changed: now, read: -Infinity };
+        if (now - state.read < (now - state.changed >= 10_000 ? 1500 : 400)) return;
+        screens.set(surface, state);
         try {
           const screen = await picker(["read-screen", "--surface", surface, "--lines", "20"]);
+          if (state.text !== screen) { state.text = screen; state.changed = now; }
           const lines = screen.split("\n").map(line => line.trim()).filter(Boolean).slice(-12);
           // The normal input box (a "❯" line between two rules) means no menu, even when the
           // chat text just above it quotes a hint.
           const rule = (line?: string) => /^─{10,}$/.test(line ?? "");
           const box = lines.some((line, i) => line.startsWith("❯") && rule(lines[i - 1]) && lines.slice(i + 1).some(rule));
-          if (!box && lines.some(line => MENU_HINT.test(line))) menus.add(surface);
+          if (!box && lines.slice(-3).some(line => MENU_HINT.test(line))) menus.add(surface);
           else menus.delete(surface);
         } catch { /* Keep the last screen state until cmux answers. */ }
+        finally { state.read = performance.now(); }
       }));
-      lastRead = performance.now();
     }
     const surfaces = new Set(tabs.flatMap(t => t.chat && pairFor(tabs, t.chat) ? [t.chat] : []));
     for (const surface of states.keys()) if (!surfaces.has(surface)) states.delete(surface);
@@ -202,9 +225,10 @@ export function questionWatcher(rpc: Rpc, log: (line: string) => void, cmux?: (a
       if (text !== written) { writePrivate(MENUS_FILE, text); written = text; }
     }
     if (!surfaces.size) return;
-    const open = enabled ? waitingQuestions(surfaces) : new Set<string>();
+    const open = waitingQuestions(surfaces);
+    const shouldGrow = (surface: string, questions: Set<string>) => questions.has(surface) ? enabled : menus.has(surface);
     for (const surface of surfaces) {
-      const waiting = open.has(surface) || menus.has(surface);
+      const waiting = shouldGrow(surface, open);
       let state = states.get(surface);
       if (!state && !waiting) continue;
       if (!state) states.set(surface, state = { open: true, since: Date.now(), applied: false });
@@ -217,7 +241,7 @@ export function questionWatcher(rpc: Rpc, log: (line: string) => void, cmux?: (a
       if (!pair) continue;
       const { term, page } = pair;
       const g = await geometry(rpc, term, page);
-      if (!g || (menus.has(surface) || (enabled && waitingQuestions(new Set([surface]), true).has(surface))) !== waiting) continue;
+      if (!g || shouldGrow(surface, waitingQuestions(new Set([surface]), true)) !== waiting) continue;
       if (waiting) {
         const amount = Math.min(800, Math.round(g.total * 0.6 - g.size));
         if (amount < 1) continue;
@@ -419,15 +443,14 @@ if (import.meta.main) run(async () => {
     }
   }
 
-  let written = "", questionBusy = false;
+  let written = "";
   let questionTabs: Tab[] = [];
   const questions = questionWatcher(rpc, line => console.error(new Date().toISOString(), line), cmux);
-  setInterval(async () => {
-    if (questionBusy) return;
-    questionBusy = true;
+  async function checkQuestions() {
     try { await questions(questionTabs); } catch (error: any) { log(error?.message ?? "Question check failed"); }
-    finally { questionBusy = false; }
-  }, 250);
+    setTimeout(checkQuestions, 400);
+  }
+  setTimeout(checkQuestions, 400);
   let cached: { at: number; all: Tab[]; projects: Project[] } | undefined;
   async function list(all: Tab[], at: number): Promise<Project[]> {
     questionTabs = all;
@@ -438,9 +461,35 @@ if (import.meta.main) run(async () => {
     return projects;
   }
 
+  async function markBackground(projects: Project[], all: Tab[], mutate: Rpc) {
+    const chats = projects.filter(p => p.folder).flatMap(p => p.chats);
+    const listed = new Map<string, any[]>();
+    const byWorkspace = new Map(chats.map(c => [c.workspace, c.terminal]));
+    const background = backgroundTerminals(new Set(byWorkspace.values()));
+    const windows = new Set(all.map(t => t.window));
+    for (const window_id of windows) {
+      const list = async () => (await rpc("workspace.list", { window_id })).workspaces;
+      const workspaces = await list();
+      listed.set(window_id, workspaces);
+      for (const w of workspaces) {
+        const id = low(w.id), terminal = byWorkspace.get(id);
+        const on = terminal ? background.get(terminal) : false;
+        if (markedDescription(w.description ?? "", on) === (w.description ?? "")) continue;
+        // The sidebar can save a newer age while this sweep is running.
+        const current = (await list()).find((row: any) => low(row.id) === id);
+        if (!current) continue;
+        const text = current.description ?? "", description = markedDescription(text, on);
+        if (description === text) continue;
+        await mutate("workspace.action", { action: "set_description", workspace_id: id, description });
+        log("background " + (on !== false ? "on " : "off ") + id);
+      }
+    }
+    return listed;
+  }
+
   const titleAttempts = new Map<string, number>();
   let lastWindow = "";
-  async function nameWorkspaces(projects: Project[], all: Tab[], mutate: Rpc) {
+  async function nameWorkspaces(projects: Project[], all: Tab[], mutate: Rpc, listed: Map<string, any[]>) {
     const now = Date.now();
     for (const [id, at] of titleAttempts) if (now - at >= 300_000) titleAttempts.delete(id);
     const chats = projects.flatMap(p => p.chats).filter(c => /^(Claude|Codex) \+ chat$/.test(c.title) && !titleAttempts.has(c.workspace));
@@ -449,7 +498,7 @@ if (import.meta.main) run(async () => {
     const ids = new Set(chats.map(c => c.workspace));
     const windows = [...new Set(all.filter(t => ids.has(t.workspace)).map(t => t.window))].sort();
     lastWindow = windows.find(id => id > lastWindow) ?? windows[0];
-    const { workspaces } = await rpc("workspace.list", { window_id: lastWindow });
+    const workspaces = listed.get(lastWindow) ?? (await rpc("workspace.list", { window_id: lastWindow })).workspaces;
     let index: ReturnType<typeof codexTitles> | undefined;
     for (const w of workspaces) {
       const chat = chats.find(c => c.workspace === low(w.id));
@@ -555,14 +604,24 @@ if (import.meta.main) run(async () => {
           const all = await read(), projects = await list(all, started);
           if (projects.some(p => p.chats.some(c => c.workspace === workspace && c.terminal === terminal))) {
             const page = all.find(t => t.workspace === workspace && t.chat === terminal);
-            if (closeWithPage && page) closingPages.add(page.id);
+            const members = all.filter(t => t.workspace === workspace);
+            // Only the page paired with this terminal: a guess could close another browser tab.
+            const chatPage = page;
+            if (!chatPage) continue;
+            if (closeWithPage) closingPages.add(chatPage.id);
             try {
-              await mutate("workspace.close", { workspace_id: workspace, force: true });
+              if (members.length === 2) {
+                await mutate("workspace.close", { workspace_id: workspace, force: true });
+                log("closed chat workspace " + workspace + " from its tab");
+              } else {
+                await mutate("surface.close", { workspace_id: workspace, surface_id: chatPage.id });
+                await mutate("surface.close", { workspace_id: workspace, surface_id: terminal, force: true });
+                log("closed chat surfaces in workspace " + workspace + " from its tab");
+              }
             } catch (err) {
-              if (page) closingPages.delete(page.id);
+              closingPages.delete(chatPage.id);
               throw err;
             }
-            log("closed chat workspace " + workspace + " from its tab");
             stale = true;
           }
         } catch (err: any) { log(err?.message ?? String(err)); }
@@ -599,13 +658,18 @@ if (import.meta.main) run(async () => {
           const pending = [...closedPages.values()];
           const all = await read();
           fails = 0; silentSince = 0;
-          await confirmPageCloses(all, pending, mutate);
           const projects = await list(all, started);
+          let listed = new Map<string, any[]>();
+          if (!only) {
+            try { listed = await markBackground(projects, all, mutate); }
+            catch (err: any) { log(err?.message ?? String(err)); }
+          }
+          await confirmPageCloses(all, pending, mutate);
           await closeWorkspaces(all, mutate);
           if (!only) {
             await name(all, mutate);
             if (boot) await close(all, mutate);
-            await nameWorkspaces(projects, all, mutate);
+            await nameWorkspaces(projects, all, mutate, listed);
           }
         }
       } catch (err: any) {
@@ -625,7 +689,7 @@ if (import.meta.main) run(async () => {
   setInterval(sweep, SWEEP);
 
   // The list follows the events. A read can be a second old, so it is read two times.
-  const LISTED = /^(surface\.(created|closed|action|moved)|workspace\.(created|closed|renamed|action|reordered|selected)|notification\.)/;
+  const LISTED = /^(surface\.(created|closed|action|moved|selected)|workspace\.(created|closed|renamed|action|reordered|selected)|notification\.)/;
   let soon: Timer | undefined, later: Timer | undefined;
   const relist = () => ((stale = true), work());
   function changed() {
